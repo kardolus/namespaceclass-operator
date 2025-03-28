@@ -1,32 +1,23 @@
----
+# permissions for end users to view namespaceclasses.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: manager-role
+  labels:
+    app.kubernetes.io/name: namespaceclass-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: namespaceclass-viewer-role
 rules:
 - apiGroups:
   - namespace.kardolus.dev
   resources:
   - namespaceclasses
   verbs:
-  - create
-  - delete
   - get
   - list
-  - patch
-  - update
   - watch
-- apiGroups:
-  - namespace.kardolus.dev
-  resources:
-  - namespaceclasses/finalizers
-  verbs:
-  - update
 - apiGroups:
   - namespace.kardolus.dev
   resources:
   - namespaceclasses/status
   verbs:
   - get
-  - patch
-  - update

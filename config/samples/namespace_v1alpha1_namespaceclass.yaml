@@ -1,0 +1,9 @@
+apiVersion: namespace.kardolus.dev/v1alpha1
+kind: NamespaceClass
+metadata:
+  labels:
+    app.kubernetes.io/name: namespaceclass-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: namespaceclass-sample
+spec:
+  # TODO(user): Add fields here
