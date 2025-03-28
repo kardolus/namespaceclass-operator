@@ -1,18 +1,33 @@
 # namespaceclass-operator
-// TODO(user): Add simple overview of use/purpose
+
+A Kubernetes operator that enables reusable, class-based namespace provisioning.
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+
+The `namespaceclass-operator` introduces a new Kubernetes resource called `NamespaceClass`. Each `NamespaceClass`
+defines a reusable set of resources (e.g. NetworkPolicies, ServiceAccounts) that should be automatically created
+whenever a `Namespace` is assigned to that class via a label.
+
+This allows platform administrators to define consistent namespace environments such as `internal-network` or
+`public-network`, and have the operator enforce the appropriate configuration for each class.
+
+The operator ensures:
+
+- Resources are created automatically when a namespace is created with a matching class.
+- Resources are updated when the `NamespaceClass` changes.
+- Resources are removed and re-created if a namespace switches from one class to another.
 
 ## Getting Started
 
 ### Prerequisites
+
 - go version v1.22.0+
 - docker version 17.03+.
 - kubectl version v1.11.3+.
 - Access to a Kubernetes v1.11.3+ cluster.
 
 ### To Deploy on the cluster
+
 **Build and push your image to the location specified by `IMG`:**
 
 ```sh
@@ -36,7 +51,7 @@ make deploy IMG=<some-registry>/namespaceclass-operator:tag
 ```
 
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+> privileges or be logged in as admin.
 
 **Create instances of your solution**
 You can apply the samples (examples) from the config/sample:
@@ -45,9 +60,10 @@ You can apply the samples (examples) from the config/sample:
 kubectl apply -k config/samples/
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
+> **NOTE**: Ensure that the samples has default values to test it out.
 
 ### To Uninstall
+
 **Delete the instances (CRs) from the cluster:**
 
 ```sh
@@ -90,6 +106,7 @@ kubectl apply -f https://raw.githubusercontent.com/<org>/namespaceclass-operator
 ```
 
 ## Contributing
+
 // TODO(user): Add detailed information on how you would like others to contribute to this project
 
 **NOTE:** Run `make help` for more information on all potential `make` targets

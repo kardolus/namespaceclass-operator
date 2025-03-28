@@ -39,10 +39,14 @@ spec:
           spec:
             description: NamespaceClassSpec defines the desired state of NamespaceClass
             properties:
-              foo:
-                description: Foo is an example field of NamespaceClass. Edit namespaceclass_types.go
-                  to remove/update
-                type: string
+              resources:
+                description: |-
+                  Resources is a list of raw Kubernetes resources (e.g. NetworkPolicy, ServiceAccount)
+                  that should be created in any namespace using this class.
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                type: array
             type: object
           status:
             description: NamespaceClassStatus defines the observed state of NamespaceClass

@@ -18,24 +18,19 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
-
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // NamespaceClassSpec defines the desired state of NamespaceClass
 type NamespaceClassSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// Foo is an example field of NamespaceClass. Edit namespaceclass_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	// Resources is a list of raw Kubernetes resources (e.g. NetworkPolicy, ServiceAccount)
+	// that should be created in any namespace using this class.
+	Resources []runtime.RawExtension `json:"resources,omitempty"`
 }
 
 // NamespaceClassStatus defines the observed state of NamespaceClass
 type NamespaceClassStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// TODO INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 }
 
 // +kubebuilder:object:root=true
