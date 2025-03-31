@@ -12,7 +12,7 @@ spec:
     listKind: NamespaceClassList
     plural: namespaceclasses
     singular: namespaceclass
-  scope: Namespaced
+  scope: Cluster
   versions:
   - name: v1alpha1
     schema:

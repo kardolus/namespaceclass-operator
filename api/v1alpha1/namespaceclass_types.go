@@ -35,6 +35,7 @@ type NamespaceClassStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Cluster
 
 // NamespaceClass is the Schema for the namespaceclasses API
 type NamespaceClass struct {

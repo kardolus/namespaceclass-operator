@@ -62,6 +62,23 @@ kubectl apply -k config/samples/
 
 > **NOTE**: Ensure that the samples has default values to test it out.
 
+## To Test Locally on a Kind Cluster
+
+If you’re developing locally and want to test everything end-to-end using kind, use the helper script:
+
+```shell
+hack/kind.sh
+```
+
+This script:
+* Creates a new kind cluster (default name: apache)
+* Builds the operator image locally 
+* Loads the image into the cluster 
+* Installs CRDs 
+* Deploys the operator using the local image
+
+You can then manually apply test resources or run end-to-end tests.
+
 ### To Uninstall
 
 **Delete the instances (CRs) from the cluster:**

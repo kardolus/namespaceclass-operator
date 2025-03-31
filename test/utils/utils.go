@@ -17,6 +17,7 @@ limitations under the License.
 package utils
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,25 +26,84 @@ import (
 	. "github.com/onsi/ginkgo/v2" //nolint:golint,revive
 )
 
-const (
-	prometheusOperatorVersion = "v0.72.0"
-	prometheusOperatorURL     = "https://github.com/prometheus-operator/prometheus-operator/" +
-		"releases/download/%s/bundle.yaml"
-
-	certmanagerVersion = "v1.14.4"
-	certmanagerURLTmpl = "https://github.com/jetstack/cert-manager/releases/download/%s/cert-manager.yaml"
-)
-
-func warnError(err error) {
-	_, _ = fmt.Fprintf(GinkgoWriter, "warning: %v\n", err)
+// ApplyNamespaceClass applies a NamespaceClass manifest with a single ConfigMap resource.
+func ApplyNamespaceClass(className, configMapName, value string) error {
+	manifest := fmt.Sprintf(`
+apiVersion: namespace.kardolus.dev/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: %s
+spec:
+  resources:
+  - apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: %s
+    data:
+      foo: %s
+`, className, configMapName, value)
+	return KubectlApply([]byte(manifest))
 }
 
-// InstallPrometheusOperator installs the prometheus Operator to be used to export the enabled metrics.
-func InstallPrometheusOperator() error {
-	url := fmt.Sprintf(prometheusOperatorURL, prometheusOperatorVersion)
-	cmd := exec.Command("kubectl", "create", "-f", url)
-	_, err := Run(cmd)
-	return err
+// ApplyNamespaceWithLabel applies a Namespace manifest with a namespaceclass label.
+func ApplyNamespaceWithLabel(namespace, classLabel string) error {
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: %s
+  labels:
+    namespaceclass.akuity.io/name: %s
+`, namespace, classLabel)
+	return KubectlApply([]byte(manifest))
+}
+
+// DeleteResource deletes a Kubernetes resource by kind and name (and namespace, if provided).
+func DeleteResource(kind, name string, namespace ...string) error {
+	args := []string{"delete", kind, name}
+	if len(namespace) > 0 {
+		args = append(args, "-n", namespace[0])
+	}
+	cmd := exec.Command("kubectl", args...)
+	return cmd.Run()
+}
+
+// GetProjectDir will return the directory where the project is
+func GetProjectDir() (string, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return wd, err
+	}
+	wd = strings.Replace(wd, "/test/e2e", "", -1)
+	return wd, nil
+}
+
+// KubectlApply applies the given YAML manifest using `kubectl apply -f -`
+func KubectlApply(manifest []byte) error {
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = bytes.NewReader(manifest)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Run()
+}
+
+// LoadImageToKindClusterWithName loads a Docker image into the current Kind cluster
+func LoadImageToKindClusterWithName(image, clusterName string) error {
+	cmd := exec.Command("kind", "load", "docker-image", image, "--name", clusterName)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(GinkgoWriter, "\nkind load output:\n%s\n", out)
+		return fmt.Errorf("failed to load image into kind cluster: %v\nOutput: %s", err, string(out))
+	}
+	return nil
+}
+
+func MustProjectDir() string {
+	dir, err := GetProjectDir()
+	if err != nil {
+		panic(err)
+	}
+	return dir
 }
 
 // Run executes the provided command within this context
@@ -64,77 +124,4 @@ func Run(cmd *exec.Cmd) ([]byte, error) {
 	}
 
 	return output, nil
-}
-
-// UninstallPrometheusOperator uninstalls the prometheus
-func UninstallPrometheusOperator() {
-	url := fmt.Sprintf(prometheusOperatorURL, prometheusOperatorVersion)
-	cmd := exec.Command("kubectl", "delete", "-f", url)
-	if _, err := Run(cmd); err != nil {
-		warnError(err)
-	}
-}
-
-// UninstallCertManager uninstalls the cert manager
-func UninstallCertManager() {
-	url := fmt.Sprintf(certmanagerURLTmpl, certmanagerVersion)
-	cmd := exec.Command("kubectl", "delete", "-f", url)
-	if _, err := Run(cmd); err != nil {
-		warnError(err)
-	}
-}
-
-// InstallCertManager installs the cert manager bundle.
-func InstallCertManager() error {
-	url := fmt.Sprintf(certmanagerURLTmpl, certmanagerVersion)
-	cmd := exec.Command("kubectl", "apply", "-f", url)
-	if _, err := Run(cmd); err != nil {
-		return err
-	}
-	// Wait for cert-manager-webhook to be ready, which can take time if cert-manager
-	// was re-installed after uninstalling on a cluster.
-	cmd = exec.Command("kubectl", "wait", "deployment.apps/cert-manager-webhook",
-		"--for", "condition=Available",
-		"--namespace", "cert-manager",
-		"--timeout", "5m",
-	)
-
-	_, err := Run(cmd)
-	return err
-}
-
-// LoadImageToKindClusterWithName loads a local docker image to the kind cluster
-func LoadImageToKindClusterWithName(name string) error {
-	cluster := "kind"
-	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
-		cluster = v
-	}
-	kindOptions := []string{"load", "docker-image", name, "--name", cluster}
-	cmd := exec.Command("kind", kindOptions...)
-	_, err := Run(cmd)
-	return err
-}
-
-// GetNonEmptyLines converts given command output string into individual objects
-// according to line breakers, and ignores the empty elements in it.
-func GetNonEmptyLines(output string) []string {
-	var res []string
-	elements := strings.Split(output, "\n")
-	for _, element := range elements {
-		if element != "" {
-			res = append(res, element)
-		}
-	}
-
-	return res
-}
-
-// GetProjectDir will return the directory where the project is
-func GetProjectDir() (string, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return wd, err
-	}
-	wd = strings.Replace(wd, "/test/e2e", "", -1)
-	return wd, nil
 }

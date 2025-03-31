@@ -17,8 +17,10 @@ limitations under the License.
 package e2e
 
 import (
+	"bytes"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -27,96 +29,121 @@ import (
 	"github.com/kardolus/namespaceclass-operator/test/utils"
 )
 
-const namespace = "namespaceclass-operator-system"
+const (
+	operatorNamespace  = "namespaceclass-operator-system"
+	testNamespace      = "web-portal"
+	namespaceClassName = "public-network"
+	injectedConfigMap  = "injected-config"
+	controllerImage    = "namespaceclass-operator:test" // local image tag for Kind
+)
 
-var _ = Describe("controller", Ordered, func() {
+var _ = Describe("namespaceclass operator e2e", Ordered, func() {
 	BeforeAll(func() {
-		By("installing prometheus operator")
-		Expect(utils.InstallPrometheusOperator()).To(Succeed())
+		By("building the manager image")
+		cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", controllerImage))
+		out, err := utils.Run(cmd)
+		fmt.Fprintf(GinkgoWriter, "\nmake docker-build output:\n%s\n", out)
+		Expect(err).NotTo(HaveOccurred())
 
-		By("installing the cert-manager")
-		Expect(utils.InstallCertManager()).To(Succeed())
+		By("loading the image into kind")
+		Expect(utils.LoadImageToKindClusterWithName(controllerImage, "apache")).To(Succeed())
 
-		By("creating manager namespace")
-		cmd := exec.Command("kubectl", "create", "ns", namespace)
-		_, _ = utils.Run(cmd)
+		By("installing CRDs")
+		cmd = exec.Command("make", "install")
+		out, err = utils.Run(cmd)
+		fmt.Fprintf(GinkgoWriter, "\nmake install output:\n%s\n", out)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("patching the image in config/manager/kustomization.yaml")
+		cmd = exec.Command("bash", "-c",
+			fmt.Sprintf("cd config/manager && %s edit set image controller=%s",
+				filepath.Join(utils.MustProjectDir(), "bin", "kustomize"), controllerImage))
+		out, err = utils.Run(cmd)
+		fmt.Fprintf(GinkgoWriter, "\nkustomize edit output:\n%s\n", out)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("deploying the controller with patched image")
+		cmd = exec.Command(filepath.Join(utils.MustProjectDir(), "bin", "kustomize"), "build", filepath.Join(utils.MustProjectDir(), "config/default"))
+		manifests, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		cmd = exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = bytes.NewReader(manifests)
+		cmd.Stdout = GinkgoWriter
+		cmd.Stderr = GinkgoWriter
+		Expect(cmd.Run()).To(Succeed())
 	})
 
 	AfterAll(func() {
-		By("uninstalling the Prometheus manager bundle")
-		utils.UninstallPrometheusOperator()
+		By("cleaning up test namespace and resources")
 
-		By("uninstalling the cert-manager bundle")
-		utils.UninstallCertManager()
-
-		By("removing manager namespace")
-		cmd := exec.Command("kubectl", "delete", "ns", namespace)
-		_, _ = utils.Run(cmd)
+		if err := utils.DeleteResource("namespace", testNamespace); err != nil {
+			fmt.Fprintf(GinkgoWriter, "failed to delete namespace %s: %v\n", testNamespace, err)
+		}
+		if err := utils.DeleteResource("namespaceclass", namespaceClassName); err != nil {
+			fmt.Fprintf(GinkgoWriter, "failed to delete namespaceclass %s: %v\n", namespaceClassName, err)
+		}
+		if err := utils.DeleteResource("namespace", operatorNamespace); err != nil {
+			fmt.Fprintf(GinkgoWriter, "failed to delete namespace %s: %v\n", operatorNamespace, err)
+		}
 	})
 
-	Context("Operator", func() {
-		It("should run successfully", func() {
-			var controllerPodName string
-			var err error
+	It("should create resources defined in a NamespaceClass when a namespace is labeled", func() {
+		By("applying NamespaceClass resource")
+		Expect(utils.ApplyNamespaceClass(namespaceClassName, injectedConfigMap, "bar")).To(Succeed())
 
-			// projectimage stores the name of the image used in the example
-			var projectimage = "example.com/namespaceclass-operator:v0.0.1"
+		By("creating a namespace with the class label")
+		Expect(utils.ApplyNamespaceWithLabel(testNamespace, namespaceClassName)).To(Succeed())
 
-			By("building the manager(Operator) image")
-			cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", projectimage))
-			_, err = utils.Run(cmd)
-			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		By("waiting for the operator deployment to be ready")
+		cmd := exec.Command("kubectl", "rollout", "status", "deployment/namespaceclass-operator-controller-manager", "-n", operatorNamespace, "--timeout=60s")
+		out, err := utils.Run(cmd)
+		fmt.Fprintf(GinkgoWriter, "\nrollout status output:\n%s\n", out)
+		Expect(err).NotTo(HaveOccurred())
 
-			By("loading the the manager(Operator) image on Kind")
-			err = utils.LoadImageToKindClusterWithName(projectimage)
-			ExpectWithOffset(1, err).NotTo(HaveOccurred())
-
-			By("installing CRDs")
-			cmd = exec.Command("make", "install")
-			_, err = utils.Run(cmd)
-			ExpectWithOffset(1, err).NotTo(HaveOccurred())
-
-			By("deploying the controller-manager")
-			cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", projectimage))
-			_, err = utils.Run(cmd)
-			ExpectWithOffset(1, err).NotTo(HaveOccurred())
-
-			By("validating that the controller-manager pod is running as expected")
-			verifyControllerUp := func() error {
-				// Get pod name
-
-				cmd = exec.Command("kubectl", "get",
-					"pods", "-l", "control-plane=controller-manager",
-					"-o", "go-template={{ range .items }}"+
-						"{{ if not .metadata.deletionTimestamp }}"+
-						"{{ .metadata.name }}"+
-						"{{ \"\\n\" }}{{ end }}{{ end }}",
-					"-n", namespace,
-				)
-
-				podOutput, err := utils.Run(cmd)
-				ExpectWithOffset(2, err).NotTo(HaveOccurred())
-				podNames := utils.GetNonEmptyLines(string(podOutput))
-				if len(podNames) != 1 {
-					return fmt.Errorf("expect 1 controller pods running, but got %d", len(podNames))
-				}
-				controllerPodName = podNames[0]
-				ExpectWithOffset(2, controllerPodName).Should(ContainSubstring("controller-manager"))
-
-				// Validate pod status
-				cmd = exec.Command("kubectl", "get",
-					"pods", controllerPodName, "-o", "jsonpath={.status.phase}",
-					"-n", namespace,
-				)
-				status, err := utils.Run(cmd)
-				ExpectWithOffset(2, err).NotTo(HaveOccurred())
-				if string(status) != "Running" {
-					return fmt.Errorf("controller pod in %s status", status)
-				}
-				return nil
+		By("waiting for the operator to reconcile resources")
+		Eventually(func() string {
+			out, err := exec.Command("kubectl", "get", "configmap", injectedConfigMap, "-n", testNamespace, "-o", "yaml").CombinedOutput()
+			fmt.Fprintf(GinkgoWriter, "\nkubectl get configmap output:\n%s\n", out)
+			if err != nil {
+				fmt.Fprintf(GinkgoWriter, "\nerror retrieving configmap: %v\n", err)
 			}
-			EventuallyWithOffset(1, verifyControllerUp, time.Minute, time.Second).Should(Succeed())
+			return string(out)
+		}, time.Minute, time.Second*10).Should(ContainSubstring("foo: bar"))
+	})
 
-		})
+	It("should not duplicate resources if reconciled multiple times", func() {
+		By("applying NamespaceClass resource")
+		Expect(utils.ApplyNamespaceClass(namespaceClassName, injectedConfigMap, "bar")).To(Succeed())
+
+		By("creating a namespace with the class label")
+		Expect(utils.ApplyNamespaceWithLabel(testNamespace, namespaceClassName)).To(Succeed())
+
+		By("waiting for the operator to inject the ConfigMap")
+		Eventually(func() string {
+			out, err := exec.Command("kubectl", "get", "configmap", injectedConfigMap, "-n", testNamespace, "-o", "yaml").CombinedOutput()
+			fmt.Fprintf(GinkgoWriter, "\nconfigmap after initial create:\n%s\n", out)
+			if err != nil {
+				fmt.Fprintf(GinkgoWriter, "\nerror retrieving configmap: %v\n", err)
+			}
+			return string(out)
+		}, time.Minute, time.Second*5).Should(ContainSubstring("foo: bar"))
+
+		By("re-applying the same NamespaceClass")
+		Expect(utils.ApplyNamespaceClass(namespaceClassName, injectedConfigMap, "bar")).To(Succeed())
+
+		By("checking there is still only one injected ConfigMap")
+		cmd := exec.Command("kubectl", "get", "configmap", "-n", testNamespace, "-o", "name")
+		out, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+		fmt.Fprintf(GinkgoWriter, "\nconfigmaps after re-applying NamespaceClass:\n%s\n", out)
+
+		var count int
+		for _, line := range bytes.Split(out, []byte("\n")) {
+			if bytes.Contains(line, []byte(injectedConfigMap)) {
+				count++
+			}
+		}
+		Expect(count).To(Equal(1), "expected only one ConfigMap named %s, found %d", injectedConfigMap, count)
 	})
 })

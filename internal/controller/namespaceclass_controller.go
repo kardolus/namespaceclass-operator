@@ -18,14 +18,16 @@ package controller
 
 import (
 	"context"
-
+	"github.com/kardolus/namespaceclass-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	namespacev1alpha1 "github.com/kardolus/namespaceclass-operator/api/v1alpha1"
 )
+
+const NamespaceClassLabelKey = "namespaceclass.akuity.io/name"
 
 // NamespaceClassReconciler reconciles a NamespaceClass object
 type NamespaceClassReconciler struct {
@@ -36,20 +38,21 @@ type NamespaceClassReconciler struct {
 // +kubebuilder:rbac:groups=namespace.kardolus.dev,resources=namespaceclasses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=namespace.kardolus.dev,resources=namespaceclasses/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=namespace.kardolus.dev,resources=namespaceclasses/finalizers,verbs=update
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=configmaps;secrets;services;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the NamespaceClass object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
+// Reconcile handles namespace events and applies resources from the associated
+// NamespaceClass, if present.
 //
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.0/pkg/reconcile
+// This method is triggered whenever a NamespaceClass or Namespace object changes.
+// For Namespace objects, if the "namespaceclass.akuity.io/name" label is present,
+// the controller will look up the referenced NamespaceClass and create the defined
+// resources within the Namespace.
 func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = log.FromContext(ctx)
-
-	// TODO(user): your logic here
+	var ns corev1.Namespace
+	if err := r.Get(ctx, req.NamespacedName, &ns); err == nil {
+		return r.reconcileNamespace(ctx, &ns)
+	}
 
 	return ctrl.Result{}, nil
 }
@@ -57,6 +60,51 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 // SetupWithManager sets up the controller with the Manager.
 func (r *NamespaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&namespacev1alpha1.NamespaceClass{}).
+		For(&corev1.Namespace{}).
 		Complete(r)
 }
+
+func (r *NamespaceClassReconciler) reconcileNamespace(ctx context.Context, ns *corev1.Namespace) (ctrl.Result, error) {
+	log := ctrl.LoggerFrom(ctx).WithValues("namespace", ns.Name)
+
+	log.Info("Reconciling namespace")
+
+	className, ok := ns.Labels[NamespaceClassLabelKey]
+	if !ok {
+		log.Info("Skipping namespace without NamespaceClass label")
+		return ctrl.Result{}, nil
+	}
+
+	var class v1alpha1.NamespaceClass
+	if err := r.Get(ctx, types.NamespacedName{Name: className}, &class); err != nil {
+		log.Error(err, "Failed to get NamespaceClass", "className", className)
+		return ctrl.Result{}, err
+	}
+
+	log.Info("Applying NamespaceClass", "class", className)
+
+	for _, res := range class.Spec.Resources {
+		obj := &unstructured.Unstructured{}
+		if err := obj.UnmarshalJSON(res.Raw); err != nil {
+			log.Error(err, "Failed to unmarshal embedded resource")
+			continue
+		}
+
+		// Force the resource into the namespace
+		obj.SetNamespace(ns.Name)
+
+		if err := r.Create(ctx, obj); err != nil {
+			log.Error(err, "Failed to create resource in namespace", "gvk", obj.GroupVersionKind())
+			continue
+		}
+
+		log.Info("Created resource", "kind", obj.GetKind(), "name", obj.GetName())
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// TODO implement DELETE
+// TODO implement UPDATE
+// TODO Add predicate to filter namespaces that have the namespaceclass.akuity.io/name label
+// TODO re-review the generated RBAC - did we go too far with the permissions?
