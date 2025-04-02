@@ -24,7 +24,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
 const NamespaceClassLabelKey = "namespaceclass.akuity.io/name"
@@ -50,21 +53,54 @@ type NamespaceClassReconciler struct {
 // resources within the Namespace.
 func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var ns corev1.Namespace
-	if err := r.Get(ctx, req.NamespacedName, &ns); err == nil {
-		return r.reconcileNamespace(ctx, &ns)
+
+	if err := r.Get(ctx, req.NamespacedName, &ns); err != nil {
+		if client.IgnoreNotFound(err) != nil {
+			return ctrl.Result{}, err
+		}
+		// Namespace was deleted — handle cleanup
+		return r.reconcileNamespaceDelete(ctx, req.NamespacedName.Name)
 	}
 
-	return ctrl.Result{}, nil
+	return r.reconcileNamespaceCreate(ctx, &ns)
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *NamespaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Namespace{}).
+		Watches(
+			&v1alpha1.NamespaceClass{},
+			handler.EnqueueRequestsFromMapFunc(r.mapNamespaceClassToNamespaces),
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				// Cast to your specific type if needed
+				_, ok := obj.(*v1alpha1.NamespaceClass)
+				return ok // TODO look into filter logic
+			})),
+		).
 		Complete(r)
 }
 
-func (r *NamespaceClassReconciler) reconcileNamespace(ctx context.Context, ns *corev1.Namespace) (ctrl.Result, error) {
+func (r *NamespaceClassReconciler) mapNamespaceClassToNamespaces(ctx context.Context, obj client.Object) []ctrl.Request {
+	className := obj.GetName()
+
+	var namespaces corev1.NamespaceList
+	if err := r.List(ctx, &namespaces, client.MatchingLabels{
+		NamespaceClassLabelKey: className,
+	}); err != nil {
+		return nil
+	}
+
+	var requests []ctrl.Request
+	for _, ns := range namespaces.Items {
+		requests = append(requests, ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: ns.Name},
+		})
+	}
+	return requests
+}
+
+func (r *NamespaceClassReconciler) reconcileNamespaceCreate(ctx context.Context, ns *corev1.Namespace) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx).WithValues("namespace", ns.Name)
 
 	log.Info("Reconciling namespace")
@@ -104,7 +140,37 @@ func (r *NamespaceClassReconciler) reconcileNamespace(ctx context.Context, ns *c
 	return ctrl.Result{}, nil
 }
 
-// TODO implement DELETE
+func (r *NamespaceClassReconciler) reconcileNamespaceDelete(ctx context.Context, name string) (ctrl.Result, error) {
+	log := ctrl.LoggerFrom(ctx).WithValues("namespace", name)
+	log.Info("Cleaning up resources for deleted namespace")
+
+	// Get all NamespaceClasses (or index later for optimization)
+	var classes v1alpha1.NamespaceClassList
+	if err := r.List(ctx, &classes); err != nil {
+		log.Error(err, "Failed to list NamespaceClasses")
+		return ctrl.Result{}, err
+	}
+
+	for _, class := range classes.Items {
+		for _, res := range class.Spec.Resources {
+			obj := &unstructured.Unstructured{}
+			if err := obj.UnmarshalJSON(res.Raw); err != nil {
+				log.Error(err, "Failed to unmarshal embedded resource")
+				continue
+			}
+
+			obj.SetNamespace(name)
+			if err := r.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
+				log.Error(err, "Failed to delete resource from namespace", "kind", obj.GetKind(), "name", obj.GetName())
+			} else {
+				log.Info("Deleted resource", "kind", obj.GetKind(), "name", obj.GetName())
+			}
+		}
+	}
+
+	return ctrl.Result{}, nil
+}
+
 // TODO implement UPDATE
-// TODO Add predicate to filter namespaces that have the namespaceclass.akuity.io/name label
 // TODO re-review the generated RBAC - did we go too far with the permissions?
+// TODO bonus: use Akuity to run CI/CD?

@@ -3,6 +3,7 @@ package controller_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/kardolus/namespaceclass-operator/api/v1alpha1"
 	"github.com/kardolus/namespaceclass-operator/internal/controller"
 	. "github.com/onsi/ginkgo/v2"
@@ -19,104 +20,271 @@ import (
 )
 
 var _ = Describe("Reconcile", func() {
-	It("should skip reconciliation if the NamespaceClass label is missing", func() {
-		ns := &corev1.Namespace{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "test-ns",
-			},
-		}
 
-		r, _, ctx := setupTestReconciler(ns)
+	Describe("Create", func() {
+		It("should skip reconciliation if the NamespaceClass label is missing", func() {
+			ns := &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-ns",
+				},
+			}
 
-		result, err := r.Reconcile(ctx, requestFor(ns))
-		Expect(err).NotTo(HaveOccurred())
-		Expect(result.Requeue).To(BeFalse())
+			r, _, ctx := setupTestReconciler(ns)
 
-		cMaps := listConfigMaps(r.Client, ctx, "test-ns")
-		Expect(cMaps).To(BeEmpty())
-	})
+			result, err := r.Reconcile(ctx, requestFor(ns))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Requeue).To(BeFalse())
 
-	It("should return an error if the referenced NamespaceClass does not exist", func() {
-		ns := newNamespace("test-ns", "public-network")
+			cMaps := listConfigMaps(r.Client, ctx, "test-ns")
+			Expect(cMaps).To(BeEmpty())
+		})
 
-		r, _, ctx := setupTestReconciler(ns)
+		It("should return an error if the referenced NamespaceClass does not exist", func() {
+			ns := newNamespace("test-ns", "public-network")
 
-		_, err := r.Reconcile(ctx, requestFor(ns))
-		Expect(err).To(HaveOccurred())
-	})
+			r, _, ctx := setupTestReconciler(ns)
 
-	It("should skip embedded resources that fail to unmarshal", func() {
-		ns := newNamespace("test-ns", "broken-class")
+			_, err := r.Reconcile(ctx, requestFor(ns))
+			Expect(err).To(HaveOccurred())
+		})
 
-		// Invalid Kubernetes object
-		invalid := runtime.RawExtension{Raw: []byte(`"not a k8s object"`)}
+		It("should skip embedded resources that fail to unmarshal", func() {
+			ns := newNamespace("test-ns", "broken-class")
 
-		class := &v1alpha1.NamespaceClass{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "broken-class",
-			},
-			Spec: v1alpha1.NamespaceClassSpec{
-				Resources: []runtime.RawExtension{invalid},
-			},
-		}
+			// Invalid Kubernetes object
+			invalid := runtime.RawExtension{Raw: []byte(`"not a k8s object"`)}
 
-		r, _, ctx := setupTestReconciler(ns, class)
+			class := &v1alpha1.NamespaceClass{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "broken-class",
+				},
+				Spec: v1alpha1.NamespaceClassSpec{
+					Resources: []runtime.RawExtension{invalid},
+				},
+			}
 
-		_, err := r.Reconcile(ctx, requestFor(ns))
-		Expect(err).NotTo(HaveOccurred())
+			r, _, ctx := setupTestReconciler(ns, class)
 
-		// Verify no resource was created
-		cMaps := listConfigMaps(r.Client, ctx, "test-ns")
-		Expect(cMaps).To(BeEmpty())
-	})
+			_, err := r.Reconcile(ctx, requestFor(ns))
+			Expect(err).NotTo(HaveOccurred())
 
-	It("should log and skip resources that already exist", func() {
-		ns := newNamespace("test-ns", "dup-class")
+			// Verify no resource was created
+			cMaps := listConfigMaps(r.Client, ctx, "test-ns")
+			Expect(cMaps).To(BeEmpty())
+		})
 
-		cm := &corev1.ConfigMap{
-			TypeMeta: metav1.TypeMeta{
-				Kind:       "ConfigMap",
-				APIVersion: "v1",
-			},
-			ObjectMeta: metav1.ObjectMeta{
+		It("should log and skip resources that already exist", func() {
+			ns := newNamespace("test-ns", "dup-class")
+
+			cm := &corev1.ConfigMap{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "ConfigMap",
+					APIVersion: "v1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "injected-config",
+					Namespace: "test-ns",
+				},
+				Data: map[string]string{"foo": "bar"},
+			}
+
+			class := newNamespaceClass("dup-class", mustRawConfigMap("injected-config", map[string]string{"foo": "bar"}))
+
+			// cm is already "existing" in the namespace
+			r, _, ctx := setupTestReconciler(ns, class, cm)
+
+			_, err := r.Reconcile(ctx, requestFor(ns))
+			Expect(err).NotTo(HaveOccurred())
+
+			// Still exactly one ConfigMap — not duplicated
+			cMaps := listConfigMaps(r.Client, ctx, "test-ns")
+			Expect(cMaps).To(HaveLen(1))
+			Expect(cMaps[0].Name).To(Equal("injected-config"))
+		})
+
+		It("should apply resources from NamespaceClass into the namespace", func() {
+			ns := newNamespace("test-ns", "public-network")
+			class := newNamespaceClass("public-network", mustRawConfigMap("injected-config", map[string]string{"foo": "bar"}))
+
+			r, _, ctx := setupTestReconciler(ns, class)
+
+			_, err := r.Reconcile(ctx, requestFor(ns))
+			Expect(err).NotTo(HaveOccurred())
+
+			var cm corev1.ConfigMap
+			err = r.Get(ctx, types.NamespacedName{
 				Name:      "injected-config",
 				Namespace: "test-ns",
-			},
-			Data: map[string]string{"foo": "bar"},
-		}
-
-		class := newNamespaceClass("dup-class", mustRawConfigMap("injected-config", map[string]string{"foo": "bar"}))
-
-		// cm is already "existing" in the namespace
-		r, _, ctx := setupTestReconciler(ns, class, cm)
-
-		_, err := r.Reconcile(ctx, requestFor(ns))
-		Expect(err).NotTo(HaveOccurred())
-
-		// Still exactly one ConfigMap — not duplicated
-		cMaps := listConfigMaps(r.Client, ctx, "test-ns")
-		Expect(cMaps).To(HaveLen(1))
-		Expect(cMaps[0].Name).To(Equal("injected-config"))
+			}, &cm)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cm.Data).To(HaveKeyWithValue("foo", "bar"))
+		})
 	})
 
-	It("should apply resources from NamespaceClass into the namespace", func() {
-		ns := newNamespace("test-ns", "public-network")
-		class := newNamespaceClass("public-network", mustRawConfigMap("injected-config", map[string]string{"foo": "bar"}))
+	Describe("Delete", func() {
+		It("should return an error if listing NamespaceClasses fails during deletion", func() {
+			const nsName = "list-fail-ns"
 
-		r, _, ctx := setupTestReconciler(ns, class)
+			// No Namespace object (simulate deletion)
+			// We only want to trigger the list failure path
 
-		_, err := r.Reconcile(ctx, requestFor(ns))
-		Expect(err).NotTo(HaveOccurred())
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 
-		var cm corev1.ConfigMap
-		err = r.Get(ctx, types.NamespacedName{
-			Name:      "injected-config",
-			Namespace: "test-ns",
-		}, &cm)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(cm.Data).To(HaveKeyWithValue("foo", "bar"))
+			// Wrap client to fail on List
+			fakeClient := &errorOnListClient{
+				Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+			}
+
+			r := &controller.NamespaceClassReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			ctx := log.IntoContext(context.Background(), zap.New(zap.WriteTo(GinkgoWriter)))
+
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: nsName},
+			})
+			Expect(err).To(MatchError(ContainSubstring("mock list error")))
+		})
+
+		It("should skip resources that fail to unmarshal during deletion", func() {
+			const nsName = "delete-bad-unmarshal"
+			const className = "bad-delete-class"
+
+			invalid := runtime.RawExtension{Raw: []byte(`"still not a k8s object"`)}
+
+			class := newNamespaceClass(className, invalid)
+
+			r, _, ctx := setupTestReconciler(class)
+
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: nsName}, // simulate deleted namespace
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should log and continue if deleting a resource returns an error", func() {
+			const nsName = "delete-fail-ns"
+			const className = "delete-fail-class"
+			const configMapName = "fail-delete-cm"
+
+			// Inject a ConfigMap that should be deleted
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      configMapName,
+					Namespace: nsName,
+				},
+				Data: map[string]string{"foo": "bar"},
+			}
+
+			// Build a NamespaceClass that embeds that same ConfigMap
+			class := newNamespaceClass(className, mustRawConfigMap(configMapName, map[string]string{"foo": "bar"}))
+
+			// Create a fake client, but intercept the Delete call to return an error
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+
+			fakeClient := &errorOnDeleteClient{
+				Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(class, cm).Build(),
+			}
+
+			r := &controller.NamespaceClassReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			ctx := log.IntoContext(context.Background(), zap.New(zap.WriteTo(GinkgoWriter)))
+
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: nsName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should clean up resources when a namespace is deleted", func() {
+			const nsName = "cleanup-ns"
+			const className = "cleanup-class"
+			const configMapName = "cleanup-cm"
+
+			// Namespace is gone (simulate delete by not adding it)
+			// But the ConfigMap still exists
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      configMapName,
+					Namespace: nsName,
+				},
+				Data: map[string]string{"foo": "bar"},
+			}
+
+			class := newNamespaceClass(className, mustRawConfigMap(configMapName, map[string]string{"foo": "bar"}))
+
+			r, _, ctx := setupTestReconciler(class, cm)
+
+			// Trigger delete reconciliation via a request
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: nsName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Ensure the ConfigMap is cleaned up
+			cMaps := listConfigMaps(r.Client, ctx, nsName)
+			Expect(cMaps).To(BeEmpty())
+		})
+
+		It("should return an error if Get fails and it's not NotFound", func() {
+			const nsName = "get-fail-ns"
+
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+
+			fakeClient := &errorOnGetClient{
+				Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+			}
+
+			r := &controller.NamespaceClassReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			ctx := log.IntoContext(context.Background(), zap.New(zap.WriteTo(GinkgoWriter)))
+
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: nsName},
+			})
+			Expect(err).To(MatchError(ContainSubstring("simulated get error")))
+		})
 	})
 })
+
+type errorOnDeleteClient struct {
+	client.Client
+}
+
+func (c *errorOnDeleteClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	// Simulate failure that's not NotFound
+	return fmt.Errorf("simulated delete error")
+}
+
+type errorOnGetClient struct {
+	client.Client
+}
+
+func (c *errorOnGetClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	return fmt.Errorf("simulated get error")
+}
+
+type errorOnListClient struct {
+	client.Client
+}
+
+func (c *errorOnListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	return fmt.Errorf("mock list error")
+}
 
 func listConfigMaps(t client.Client, ctx context.Context, ns string) []corev1.ConfigMap {
 	var list corev1.ConfigMapList

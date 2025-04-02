@@ -146,4 +146,58 @@ var _ = Describe("namespaceclass operator e2e", Ordered, func() {
 		}
 		Expect(count).To(Equal(1), "expected only one ConfigMap named %s, found %d", injectedConfigMap, count)
 	})
+
+	It("should reconcile a namespace when its NamespaceClass is created later", func() {
+		const lateNamespace = "late-bound-ns"
+		const lateClass = "delayed-class"
+		const lateConfigMap = "late-injected"
+
+		By("creating a namespace first with a class label pointing to a non-existent class")
+		Expect(utils.ApplyNamespaceWithLabel(lateNamespace, lateClass)).To(Succeed())
+
+		By("verifying the ConfigMap is not there yet")
+		cmd := exec.Command("kubectl", "get", "configmap", lateConfigMap, "-n", lateNamespace, "-o", "yaml")
+		_, err := cmd.CombinedOutput()
+		Expect(err).To(HaveOccurred()) // should not exist yet
+
+		By("now applying the NamespaceClass with that name")
+		Expect(utils.ApplyNamespaceClass(lateClass, lateConfigMap, "late-bar")).To(Succeed())
+
+		By("waiting for the operator to reconcile and inject the ConfigMap")
+		Eventually(func() string {
+			out, err := exec.Command("kubectl", "get", "configmap", lateConfigMap, "-n", lateNamespace, "-o", "yaml").CombinedOutput()
+			fmt.Fprintf(GinkgoWriter, "\nkubectl get configmap output:\n%s\n", out)
+			if err != nil {
+				fmt.Fprintf(GinkgoWriter, "\nerror retrieving configmap: %v\n", err)
+			}
+			return string(out)
+		}, time.Minute, 5*time.Second).Should(ContainSubstring("foo: late-bar"))
+
+		// Cleanup just this test
+		_ = utils.DeleteResource("namespace", lateNamespace)
+		_ = utils.DeleteResource("namespaceclass", lateClass)
+	})
+
+	It("should delete resources when a namespace is deleted", func() {
+		By("applying NamespaceClass resource")
+		Expect(utils.ApplyNamespaceClass(namespaceClassName, injectedConfigMap, "bar")).To(Succeed())
+
+		By("creating a namespace with the class label")
+		Expect(utils.ApplyNamespaceWithLabel(testNamespace, namespaceClassName)).To(Succeed())
+
+		By("waiting for the ConfigMap to be injected")
+		Eventually(func() string {
+			out, _ := exec.Command("kubectl", "get", "configmap", injectedConfigMap, "-n", testNamespace, "-o", "yaml").CombinedOutput()
+			return string(out)
+		}, time.Minute, time.Second*5).Should(ContainSubstring("foo: bar"))
+
+		By("deleting the namespace")
+		Expect(utils.DeleteResource("namespace", testNamespace)).To(Succeed())
+
+		By("verifying the injected ConfigMap is gone")
+		Eventually(func() string {
+			out, _ := exec.Command("kubectl", "get", "configmap", injectedConfigMap, "-n", testNamespace).CombinedOutput()
+			return string(out)
+		}, time.Minute, time.Second*5).Should(ContainSubstring("Error from server (NotFound)"))
+	})
 })
