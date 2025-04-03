@@ -122,7 +122,58 @@ var _ = Describe("Reconcile", func() {
 	})
 
 	Describe("Delete", func() {
+		It("should delete resources if cleanup annotation is set", func() {
+			ns := newNamespace("cleanup-ns", "clean-class")
+			ns.Annotations = map[string]string{
+				controller.NamespaceClassCleanupKey: "true",
+			}
+			cm := mustRawConfigMap("to-delete", map[string]string{"foo": "bar"})
+			class := newNamespaceClass("clean-class", cm)
 
+			r, _, ctx := setupTestReconciler(ns, class)
+
+			injected := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "to-delete",
+					Namespace: ns.Name,
+				},
+				Data: map[string]string{"foo": "bar"},
+			}
+			Expect(r.Create(ctx, injected)).To(Succeed())
+
+			Expect(r.Delete(ctx, class)).To(Succeed())
+
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: class.Name},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(listConfigMaps(r.Client, ctx, ns.Name)).To(BeEmpty())
+		})
+
+		It("should emit an event if cleanup annotation is not set", func() {
+			ns := newNamespace("orphan-ns", "orphan-class")
+			class := newNamespaceClass("orphan-class", mustRawConfigMap("should-stay", map[string]string{"baz": "qux"}))
+
+			r, _, ctx := setupTestReconciler(ns, class)
+
+			Expect(r.Create(ctx, &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "should-stay",
+					Namespace: ns.Name,
+				},
+				Data: map[string]string{"baz": "qux"},
+			})).To(Succeed())
+
+			Expect(r.Delete(ctx, class)).To(Succeed())
+
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: class.Name},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(listConfigMaps(r.Client, ctx, ns.Name)).To(HaveLen(1))
+		})
 	})
 })
 
@@ -153,7 +204,7 @@ func mustRawConfigMap(name string, data map[string]string) runtime.RawExtension 
 func newNamespace(name, classLabel string) *corev1.Namespace {
 	labels := map[string]string{}
 	if classLabel != "" {
-		labels[controller.NamespaceClassLabelKey] = classLabel
+		labels[controller.NamespaceClassNameKey] = classLabel
 	}
 	return &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{

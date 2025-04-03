@@ -19,6 +19,7 @@ package e2e
 import (
 	"bytes"
 	"fmt"
+	"github.com/kardolus/namespaceclass-operator/internal/controller"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -160,7 +161,7 @@ var _ = Describe("namespaceclass operator e2e", Ordered, func() {
 		Eventually(func() string {
 			out, _ := exec.Command("kubectl", "get", "events", "--all-namespaces").CombinedOutput()
 			return string(out)
-		}, 20*time.Second, 2*time.Second).Should(ContainSubstring("MissingNamespaceClass"))
+		}, 20*time.Second, 2*time.Second).Should(ContainSubstring("OrphanedNamespaceClass"))
 
 		By("verifying the ConfigMap is not there yet")
 		cmd := exec.Command("kubectl", "get", "configmap", lateConfigMap, "-n", lateNamespace, "-o", "yaml")
@@ -191,28 +192,71 @@ var _ = Describe("namespaceclass operator e2e", Ordered, func() {
 
 		_ = utils.DeleteResource("namespace", lateNamespace)
 		_ = utils.DeleteResource("namespaceclass", lateClass)
+		_ = utils.DeleteEventsForInvolvedObject("late-bound-ns")
 	})
 
-	It("should delete resources when a namespace is deleted", func() {
-		By("applying NamespaceClass resource")
-		Expect(utils.ApplyNamespaceClass(namespaceClassName, injectedConfigMap, "bar")).To(Succeed())
+	It("should clean up resources when NamespaceClass is deleted and cleanup annotation is present", func() {
+		const ns = "cleanup-ns"
+		const class = "cleanup-class"
+		const cm = "cleanup-config"
 
-		By("creating a namespace with the class label")
-		Expect(utils.ApplyNamespaceWithLabel(testNamespace, namespaceClassName)).To(Succeed())
+		By("creating a namespace with cleanup annotation and class label")
+		Expect(utils.ApplyNamespaceWithLabel(ns, class)).To(Succeed())
+		Expect(utils.PatchNamespace(ns, map[string]string{
+			controller.NamespaceClassCleanupKey: "true",
+		})).To(Succeed())
 
-		By("waiting for the ConfigMap to be injected")
+		By("applying the NamespaceClass")
+		Expect(utils.ApplyNamespaceClass(class, cm, "to-be-cleaned")).To(Succeed())
+
+		By("waiting for the ConfigMap to appear")
 		Eventually(func() string {
-			out, _ := exec.Command("kubectl", "get", "configmap", injectedConfigMap, "-n", testNamespace, "-o", "yaml").CombinedOutput()
+			out, _ := exec.Command("kubectl", "get", "configmap", cm, "-n", ns, "-o", "yaml").CombinedOutput()
 			return string(out)
-		}, time.Minute, time.Second*5).Should(ContainSubstring("foo: bar"))
+		}, time.Minute, 5*time.Second).Should(ContainSubstring("foo: to-be-cleaned"))
 
-		By("deleting the namespace")
-		Expect(utils.DeleteResource("namespace", testNamespace)).To(Succeed())
+		By("deleting the NamespaceClass")
+		Expect(utils.DeleteResource("namespaceclass", class)).To(Succeed())
 
-		By("verifying the injected ConfigMap is gone")
+		By("verifying the injected resource is deleted")
 		Eventually(func() string {
-			out, _ := exec.Command("kubectl", "get", "configmap", injectedConfigMap, "-n", testNamespace).CombinedOutput()
+			out, _ := exec.Command("kubectl", "get", "configmap", cm, "-n", ns).CombinedOutput()
 			return string(out)
-		}, time.Minute, time.Second*5).Should(ContainSubstring("Error from server (NotFound)"))
+		}, time.Minute, 5*time.Second).Should(ContainSubstring("Error from server (NotFound)"))
+
+		_ = utils.DeleteResource("namespace", ns)
+		_ = utils.DeleteEventsForInvolvedObject("cleanup-ns")
+
+	})
+
+	It("should not clean up resources when NamespaceClass is deleted and cleanup annotation is missing", func() {
+		const ns = "orphan-ns"
+		const class = "orphan-class"
+		const cm = "orphan-config"
+
+		By("creating a namespace with class label but no cleanup annotation")
+		Expect(utils.ApplyNamespaceWithLabel(ns, class)).To(Succeed())
+
+		By("applying the NamespaceClass")
+		Expect(utils.ApplyNamespaceClass(class, cm, "should-stay")).To(Succeed())
+
+		By("waiting for the ConfigMap to appear")
+		Eventually(func() string {
+			out, _ := exec.Command("kubectl", "get", "configmap", cm, "-n", ns, "-o", "yaml").CombinedOutput()
+			return string(out)
+		}, time.Minute, 5*time.Second).Should(ContainSubstring("foo: should-stay"))
+
+		By("deleting the NamespaceClass")
+		Expect(utils.DeleteResource("namespaceclass", class)).To(Succeed())
+
+		By("verifying the injected resource is still present")
+		Consistently(func() string {
+			out, _ := exec.Command("kubectl", "get", "configmap", cm, "-n", ns, "-o", "yaml").CombinedOutput()
+			return string(out)
+		}, 10*time.Second, 2*time.Second).Should(ContainSubstring("foo: should-stay"))
+
+		_ = utils.DeleteResource("configmap", cm+" -n "+ns)
+		_ = utils.DeleteResource("namespace", ns)
+		_ = utils.DeleteEventsForInvolvedObject("orphan-ns")
 	})
 })

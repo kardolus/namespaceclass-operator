@@ -18,6 +18,7 @@ package utils
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -56,6 +57,36 @@ metadata:
     namespaceclass.akuity.io/name: %s
 `, namespace, classLabel)
 	return KubectlApply([]byte(manifest))
+}
+
+// DeleteEventsForInvolvedObject deletes Warning events for a given involved object name in the default namespace.
+func DeleteEventsForInvolvedObject(name string) error {
+	cmd := exec.Command(
+		"kubectl",
+		"get", "events",
+		"-n", "default",
+		"--field-selector", fmt.Sprintf("type=Warning,involvedObject.name=%s", name),
+		"-o", "jsonpath={.items[*].metadata.name}",
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to get events for %s: %v\n%s", name, err, string(out))
+	}
+
+	eventNames := strings.Fields(string(out))
+	if len(eventNames) == 0 {
+		fmt.Fprintf(GinkgoWriter, "no warning events found for %s\n", name)
+	}
+
+	for _, eventName := range eventNames {
+		delCmd := exec.Command("kubectl", "delete", "event", eventName, "-n", "default")
+		delOut, err := delCmd.CombinedOutput()
+		if err != nil {
+			fmt.Fprintf(GinkgoWriter, "failed to delete event %s: %v\n%s", eventName, err, string(delOut))
+		}
+	}
+	return nil
 }
 
 // DeleteResource deletes a Kubernetes resource by kind and name (and namespace, if provided).
@@ -104,6 +135,24 @@ func MustProjectDir() string {
 		panic(err)
 	}
 	return dir
+}
+
+// PatchNamespace adds or updates annotations on a namespace.
+func PatchNamespace(namespace string, annotations map[string]string) error {
+	patch := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"annotations": annotations,
+		},
+	}
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command("kubectl", "patch", "namespace", namespace, "--type=merge", "-p", string(patchBytes))
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Run()
 }
 
 // Run executes the provided command within this context
