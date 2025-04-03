@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -155,6 +156,12 @@ var _ = Describe("namespaceclass operator e2e", Ordered, func() {
 		By("creating a namespace first with a class label pointing to a non-existent class")
 		Expect(utils.ApplyNamespaceWithLabel(lateNamespace, lateClass)).To(Succeed())
 
+		By("verifying the operator emits a MissingNamespaceClass warning event")
+		Eventually(func() string {
+			out, _ := exec.Command("kubectl", "get", "events", "--all-namespaces").CombinedOutput()
+			return string(out)
+		}, 20*time.Second, 2*time.Second).Should(ContainSubstring("MissingNamespaceClass"))
+
 		By("verifying the ConfigMap is not there yet")
 		cmd := exec.Command("kubectl", "get", "configmap", lateConfigMap, "-n", lateNamespace, "-o", "yaml")
 		_, err := cmd.CombinedOutput()
@@ -173,7 +180,15 @@ var _ = Describe("namespaceclass operator e2e", Ordered, func() {
 			return string(out)
 		}, time.Minute, 5*time.Second).Should(ContainSubstring("foo: late-bar"))
 
-		// Cleanup just this test
+		By("cleaning up the MissingNamespaceClass event")
+		cmd = exec.Command("kubectl", "get", "events", "-n", "default", "--field-selector", fmt.Sprintf("involvedObject.name=%s", lateNamespace), "-o", "jsonpath={.items[*].metadata.name}")
+		out, err := cmd.CombinedOutput()
+		if err == nil && len(out) > 0 {
+			for _, name := range strings.Fields(string(out)) {
+				_ = exec.Command("kubectl", "delete", "event", name, "-n", "default").Run()
+			}
+		}
+
 		_ = utils.DeleteResource("namespace", lateNamespace)
 		_ = utils.DeleteResource("namespaceclass", lateClass)
 	})

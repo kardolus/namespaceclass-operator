@@ -3,7 +3,6 @@ package controller_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"github.com/kardolus/namespaceclass-operator/api/v1alpha1"
 	"github.com/kardolus/namespaceclass-operator/internal/controller"
 	. "github.com/onsi/ginkgo/v2"
@@ -12,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -126,31 +126,6 @@ var _ = Describe("Reconcile", func() {
 	})
 })
 
-type errorOnDeleteClient struct {
-	client.Client
-}
-
-func (c *errorOnDeleteClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
-	// Simulate failure that's not NotFound
-	return fmt.Errorf("simulated delete error")
-}
-
-type errorOnGetClient struct {
-	client.Client
-}
-
-func (c *errorOnGetClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	return fmt.Errorf("simulated get error")
-}
-
-type errorOnListClient struct {
-	client.Client
-}
-
-func (c *errorOnListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
-	return fmt.Errorf("mock list error")
-}
-
 func listConfigMaps(t client.Client, ctx context.Context, ns string) []corev1.ConfigMap {
 	var list corev1.ConfigMapList
 	err := t.List(ctx, &list, client.InNamespace(ns))
@@ -216,8 +191,9 @@ func setupTestReconciler(objs ...client.Object) (*controller.NamespaceClassRecon
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 
 	r := &controller.NamespaceClassReconciler{
-		Client: client,
-		Scheme: scheme,
+		Client:   client,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
 	}
 
 	ctx := context.Background()

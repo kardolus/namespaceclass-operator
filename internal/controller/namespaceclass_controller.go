@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,7 +36,8 @@ const NamespaceClassLabelKey = "namespaceclass.akuity.io/name"
 // NamespaceClassReconciler reconciles a NamespaceClass object
 type NamespaceClassReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=namespace.kardolus.dev,resources=namespaceclasses,verbs=get;list;watch;create;update;patch;delete
@@ -43,6 +45,7 @@ type NamespaceClassReconciler struct {
 // +kubebuilder:rbac:groups=namespace.kardolus.dev,resources=namespaceclasses/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps;secrets;services;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile handles namespace events and applies resources from the associated
 // NamespaceClass, if present.
@@ -63,6 +66,8 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *NamespaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.Recorder = mgr.GetEventRecorderFor("namespaceclass-controller")
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Namespace{}).
 		Watches(
@@ -110,6 +115,8 @@ func (r *NamespaceClassReconciler) reconcileNamespaceCreate(ctx context.Context,
 	var class v1alpha1.NamespaceClass
 	if err := r.Get(ctx, types.NamespacedName{Name: className}, &class); err != nil {
 		log.Error(err, "Failed to get NamespaceClass", "className", className)
+		r.Recorder.Eventf(ns, corev1.EventTypeWarning, "MissingNamespaceClass",
+			"Namespace references missing NamespaceClass '%s'", className)
 		return ctrl.Result{}, err
 	}
 
@@ -136,6 +143,8 @@ func (r *NamespaceClassReconciler) reconcileNamespaceCreate(ctx context.Context,
 	return ctrl.Result{}, nil
 }
 
+// TODO Add an annotation like namespaceclass.akuity.io/cleanup: "true" -- only delete when present
+// TODO Add warning plus Event "Namespace references deleted NamespaceClass” when cleanup is not set
 // TODO implement UPDATE
 // TODO re-review the generated RBAC - did we go too far with the permissions?
 // TODO bonus: use Akuity to run CI/CD?
