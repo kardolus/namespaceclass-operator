@@ -55,11 +55,7 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	var ns corev1.Namespace
 
 	if err := r.Get(ctx, req.NamespacedName, &ns); err != nil {
-		if client.IgnoreNotFound(err) != nil {
-			return ctrl.Result{}, err
-		}
-		// Namespace was deleted — handle cleanup
-		return r.reconcileNamespaceDelete(ctx, req.NamespacedName.Name)
+		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	return r.reconcileNamespaceCreate(ctx, &ns)
@@ -135,37 +131,6 @@ func (r *NamespaceClassReconciler) reconcileNamespaceCreate(ctx context.Context,
 		}
 
 		log.Info("Created resource", "kind", obj.GetKind(), "name", obj.GetName())
-	}
-
-	return ctrl.Result{}, nil
-}
-
-func (r *NamespaceClassReconciler) reconcileNamespaceDelete(ctx context.Context, name string) (ctrl.Result, error) {
-	log := ctrl.LoggerFrom(ctx).WithValues("namespace", name)
-	log.Info("Cleaning up resources for deleted namespace")
-
-	// Get all NamespaceClasses (or index later for optimization)
-	var classes v1alpha1.NamespaceClassList
-	if err := r.List(ctx, &classes); err != nil {
-		log.Error(err, "Failed to list NamespaceClasses")
-		return ctrl.Result{}, err
-	}
-
-	for _, class := range classes.Items {
-		for _, res := range class.Spec.Resources {
-			obj := &unstructured.Unstructured{}
-			if err := obj.UnmarshalJSON(res.Raw); err != nil {
-				log.Error(err, "Failed to unmarshal embedded resource")
-				continue
-			}
-
-			obj.SetNamespace(name)
-			if err := r.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
-				log.Error(err, "Failed to delete resource from namespace", "kind", obj.GetKind(), "name", obj.GetName())
-			} else {
-				log.Info("Deleted resource", "kind", obj.GetKind(), "name", obj.GetName())
-			}
-		}
 	}
 
 	return ctrl.Result{}, nil
