@@ -167,6 +167,48 @@ var _ = Describe("Reconcile", func() {
 		})
 	})
 
+	Describe("Update", func() {
+		It("should update existing resource if it already exists", func() {
+			ns := newNamespace("update-ns", "class")
+			original := newInjectedConfigMap("to-update", ns.Name, map[string]string{"foo": "original"})
+			updated := mustRawConfigMap("to-update", map[string]string{"foo": "updated"})
+
+			class := newNamespaceClass("class", updated)
+			r, _, ctx := setupTestReconciler(ns, class, original)
+
+			_, err := r.Reconcile(ctx, requestFor(class))
+			Expect(err).NotTo(HaveOccurred())
+
+			var cm corev1.ConfigMap
+			err = r.Get(ctx, types.NamespacedName{
+				Name:      "to-update",
+				Namespace: ns.Name,
+			}, &cm)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cm.Data).To(HaveKeyWithValue("foo", "updated"))
+		})
+
+		It("should be idempotent and not fail when applied twice", func() {
+			ns := newNamespace("same-ns", "idempotent-class")
+			cm := mustRawConfigMap("my-config", map[string]string{"foo": "bar"})
+			class := newNamespaceClass("idempotent-class", cm)
+
+			r, _, ctx := setupTestReconciler(ns, class)
+
+			// First reconcile
+			_, err := r.Reconcile(ctx, requestFor(class))
+			Expect(err).NotTo(HaveOccurred())
+
+			// Second reconcile should not fail or duplicate
+			_, err = r.Reconcile(ctx, requestFor(class))
+			Expect(err).NotTo(HaveOccurred())
+
+			cms := listConfigMaps(r.Client, ctx, ns.Name)
+			Expect(cms).To(HaveLen(1))
+			Expect(cms[0].Data).To(HaveKeyWithValue("foo", "bar"))
+		})
+	})
+
 	Describe("Finalizers", func() {
 		It("should add a finalizer to NamespaceClass if missing", func() {
 			class := newNamespaceClass("needs-finalizer", mustRawConfigMap("some", map[string]string{"x": "y"}))

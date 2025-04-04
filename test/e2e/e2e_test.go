@@ -259,4 +259,35 @@ var _ = Describe("namespaceclass operator e2e", Ordered, func() {
 		_ = utils.DeleteResource("namespace", ns)
 		_ = utils.DeleteEventsForInvolvedObject("orphan-ns")
 	})
+
+	It("should update injected resources when NamespaceClass is modified", func() {
+		const ns = "update-ns"
+		const class = "update-class"
+		const cm = "update-config"
+
+		By("creating a namespace with the class label")
+		Expect(utils.ApplyNamespaceWithLabel(ns, class)).To(Succeed())
+
+		By("applying an initial NamespaceClass")
+		Expect(utils.ApplyNamespaceClass(class, cm, "v1")).To(Succeed())
+
+		By("waiting for the initial ConfigMap value to appear")
+		Eventually(func() string {
+			out, _ := exec.Command("kubectl", "get", "configmap", cm, "-n", ns, "-o", "yaml").CombinedOutput()
+			return string(out)
+		}, time.Minute, 5*time.Second).Should(ContainSubstring("foo: v1"))
+
+		By("updating the NamespaceClass with new ConfigMap contents")
+		Expect(utils.ApplyNamespaceClass(class, cm, "v2")).To(Succeed())
+
+		By("waiting for the updated ConfigMap value to appear")
+		Eventually(func() string {
+			out, _ := exec.Command("kubectl", "get", "configmap", cm, "-n", ns, "-o", "yaml").CombinedOutput()
+			return string(out)
+		}, time.Minute, 5*time.Second).Should(ContainSubstring("foo: v2"))
+
+		_ = utils.DeleteResource("namespace", ns)
+		_ = utils.DeleteResource("namespaceclass", class)
+		_ = utils.DeleteEventsForInvolvedObject(ns)
+	})
 })

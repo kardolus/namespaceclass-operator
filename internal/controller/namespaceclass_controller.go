@@ -123,7 +123,7 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		log.Info("🔖 Finalizer added to NamespaceClass")
 	}
 
-	// Inject resources into all matching namespaces
+	// Inject or update resources in all matching namespaces
 	var nsList corev1.NamespaceList
 	if err := r.List(ctx, &nsList, client.MatchingLabels{
 		NamespaceClassNameKey: class.Name,
@@ -132,18 +132,10 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	for _, ns := range nsList.Items {
-		log := log.WithValues("namespace", ns.Name)
+		nsLog := log.WithValues("namespace", ns.Name)
 		for _, res := range class.Spec.Resources {
-			obj := &unstructured.Unstructured{}
-			if err := obj.UnmarshalJSON(res.Raw); err != nil {
-				log.Error(err, "Failed to unmarshal resource")
-				continue
-			}
-			obj.SetNamespace(ns.Name)
-			if err := r.Create(ctx, obj); err != nil {
-				log.Error(err, "Failed to create resource", "gvk", obj.GroupVersionKind())
-			} else {
-				log.Info("Created resource", "kind", obj.GetKind(), "name", obj.GetName())
+			if err := r.upsert(ctx, res, ns.Name); err != nil {
+				nsLog.Error(err, "Failed to upsert resource")
 			}
 		}
 	}
@@ -157,7 +149,7 @@ func (r *NamespaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.NamespaceClass{}). // Primary resource
-		Watches(                         // Watch namespaces to trigger reconcile on the referenced NamespaceClass
+		Watches( // Watch namespaces to trigger reconcile on the referenced NamespaceClass
 			&corev1.Namespace{},
 			handler.EnqueueRequestsFromMapFunc(r.mapNamespaceToNamespaceClass),
 			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
@@ -269,6 +261,46 @@ func (r *NamespaceClassReconciler) reconcileNamespaceCreate(ctx context.Context,
 	return ctrl.Result{}, nil
 }
 
-// TODO implement UPDATE
-// TODO re-review the generated RBAC - did we go too far with the permissions?
-// TODO bonus: use Akuity to run CI/CD?
+func (r *NamespaceClassReconciler) upsert(ctx context.Context, raw runtime.RawExtension, namespace string) error {
+	log := ctrl.LoggerFrom(ctx).WithValues("namespace", namespace)
+
+	obj := &unstructured.Unstructured{}
+	if err := obj.UnmarshalJSON(raw.Raw); err != nil {
+		log.Error(err, "Failed to unmarshal embedded resource")
+		return err
+	}
+
+	obj.SetNamespace(namespace)
+
+	// Check if the resource already exists
+	key := types.NamespacedName{
+		Name:      obj.GetName(),
+		Namespace: namespace,
+	}
+	existing := &unstructured.Unstructured{}
+	existing.SetGroupVersionKind(obj.GroupVersionKind())
+
+	if err := r.Get(ctx, key, existing); err == nil {
+		// Already exists: perform update
+		obj.SetResourceVersion(existing.GetResourceVersion())
+		if err := r.Update(ctx, obj); err != nil {
+			log.Error(err, "Failed to update existing resource", "gvk", obj.GroupVersionKind(), "name", obj.GetName())
+			return err
+		}
+		log.Info("Updated existing resource", "kind", obj.GetKind(), "name", obj.GetName())
+		return nil
+	}
+
+	// Otherwise, create it
+	if err := r.Create(ctx, obj); err != nil {
+		log.Error(err, "Failed to create resource", "gvk", obj.GroupVersionKind(), "name", obj.GetName())
+		return err
+	}
+
+	log.Info("Created resource", "kind", obj.GetKind(), "name", obj.GetName())
+	return nil
+}
+
+// TODO Upsert: handle resource deletions
+// TODO Upsert: handle renamed resources
+// TODO Bonus: use Akuity or Argo to run CI/CD
