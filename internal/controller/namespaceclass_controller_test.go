@@ -124,55 +124,64 @@ var _ = Describe("Reconcile", func() {
 	Describe("Delete", func() {
 		It("should delete resources if cleanup annotation is set", func() {
 			ns := newNamespace("cleanup-ns", "clean-class")
-			ns.Annotations = map[string]string{
-				controller.NamespaceClassCleanupKey: "true",
-			}
-			cm := mustRawConfigMap("to-delete", map[string]string{"foo": "bar"})
-			class := newNamespaceClass("clean-class", cm)
+			setCleanupAnnotation(ns)
 
-			r, _, ctx := setupTestReconciler(ns, class)
+			class := newDeletedNamespaceClass("clean-class", mustRawConfigMap("to-delete", map[string]string{"foo": "bar"}))
+			injected := newInjectedConfigMap("to-delete", ns.Name, map[string]string{"foo": "bar"})
 
-			injected := &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "to-delete",
-					Namespace: ns.Name,
-				},
-				Data: map[string]string{"foo": "bar"},
-			}
-			Expect(r.Create(ctx, injected)).To(Succeed())
-
-			Expect(r.Delete(ctx, class)).To(Succeed())
+			r, _, ctx := setupTestReconciler(ns, class, injected)
 
 			_, err := r.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: class.Name},
 			})
 			Expect(err).NotTo(HaveOccurred())
-
 			Expect(listConfigMaps(r.Client, ctx, ns.Name)).To(BeEmpty())
 		})
 
 		It("should emit an event if cleanup annotation is not set", func() {
 			ns := newNamespace("orphan-ns", "orphan-class")
-			class := newNamespaceClass("orphan-class", mustRawConfigMap("should-stay", map[string]string{"baz": "qux"}))
+
+			class := newDeletedNamespaceClass("orphan-class", mustRawConfigMap("should-stay", map[string]string{"baz": "qux"}))
+			injected := newInjectedConfigMap("should-stay", ns.Name, map[string]string{"baz": "qux"})
+
+			r, _, ctx := setupTestReconciler(ns, class, injected)
+
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: class.Name},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(listConfigMaps(r.Client, ctx, ns.Name)).To(HaveLen(1))
+		})
+
+		It("should emit an event if NamespaceClass is already deleted and namespace still references it", func() {
+			ns := newNamespace("ghost-ns", "ghost-class")
+
+			r, _, ctx := setupTestReconciler(ns)
+
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: "ghost-class"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(listConfigMaps(r.Client, ctx, "ghost-ns")).To(BeEmpty())
+		})
+	})
+
+	Describe("Finalizers", func() {
+		It("should add a finalizer to NamespaceClass if missing", func() {
+			class := newNamespaceClass("needs-finalizer", mustRawConfigMap("some", map[string]string{"x": "y"}))
+			ns := newNamespace("some-ns", "needs-finalizer")
 
 			r, _, ctx := setupTestReconciler(ns, class)
-
-			Expect(r.Create(ctx, &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "should-stay",
-					Namespace: ns.Name,
-				},
-				Data: map[string]string{"baz": "qux"},
-			})).To(Succeed())
-
-			Expect(r.Delete(ctx, class)).To(Succeed())
 
 			_, err := r.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: class.Name},
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(listConfigMaps(r.Client, ctx, ns.Name)).To(HaveLen(1))
+			var updated v1alpha1.NamespaceClass
+			Expect(r.Get(ctx, types.NamespacedName{Name: class.Name}, &updated)).To(Succeed())
+			Expect(updated.Finalizers).To(ContainElement(controller.NamespaceClassFinalizerKey))
 		})
 	})
 })
@@ -214,6 +223,30 @@ func newNamespace(name, classLabel string) *corev1.Namespace {
 	}
 }
 
+func newDeletedNamespaceClass(name string, resources ...runtime.RawExtension) *v1alpha1.NamespaceClass {
+	now := metav1.Now()
+	return &v1alpha1.NamespaceClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Finalizers:        []string{controller.NamespaceClassFinalizerKey},
+			DeletionTimestamp: &now,
+		},
+		Spec: v1alpha1.NamespaceClassSpec{
+			Resources: resources,
+		},
+	}
+}
+
+func newInjectedConfigMap(name, ns string, data map[string]string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ns,
+		},
+		Data: data,
+	}
+}
+
 func newNamespaceClass(name string, resources ...runtime.RawExtension) *v1alpha1.NamespaceClass {
 	return &v1alpha1.NamespaceClass{
 		ObjectMeta: metav1.ObjectMeta{
@@ -232,6 +265,13 @@ func requestFor(obj client.Object) reconcile.Request {
 			Namespace: obj.GetNamespace(), // optional if cluster-scoped
 		},
 	}
+}
+
+func setCleanupAnnotation(ns *corev1.Namespace) {
+	if ns.Annotations == nil {
+		ns.Annotations = map[string]string{}
+	}
+	ns.Annotations[controller.NamespaceClassCleanupKey] = "true"
 }
 
 func setupTestReconciler(objs ...client.Object) (*controller.NamespaceClassReconciler, runtime.Scheme, context.Context) {

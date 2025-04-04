@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"github.com/kardolus/namespaceclass-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -27,14 +28,16 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const (
-	NamespaceClassNameKey    = "namespaceclass.akuity.io/name"
-	NamespaceClassCleanupKey = "namespaceclass.akuity.io/cleanup"
+	NamespaceClassNameKey      = "namespaceclass.akuity.io/name"
+	NamespaceClassCleanupKey   = "namespaceclass.akuity.io/cleanup"
+	NamespaceClassFinalizerKey = "namespaceclass.kardolus.dev/finalizer"
 )
 
 // NamespaceClassReconciler reconciles a NamespaceClass object
@@ -66,44 +69,86 @@ type NamespaceClassReconciler struct {
 func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx).WithValues("reconcile", req.NamespacedName)
 
+	// If this is a Namespace, handle it
 	var ns corev1.Namespace
 	if err := r.Get(ctx, req.NamespacedName, &ns); err == nil {
 		return r.reconcileNamespaceCreate(ctx, &ns)
 	}
 
+	// Otherwise assume it's a NamespaceClass
 	var class v1alpha1.NamespaceClass
-	if err := r.Get(ctx, req.NamespacedName, &class); err == nil {
-		log.Info("Reconciling NamespaceClass", "name", class.Name)
-
-		var nsList corev1.NamespaceList
-		if err := r.List(ctx, &nsList, client.MatchingLabels{
-			NamespaceClassNameKey: class.Name,
-		}); err != nil {
-			return ctrl.Result{}, err
-		}
-
-		for _, ns := range nsList.Items {
-			log := log.WithValues("namespace", ns.Name)
-			for _, res := range class.Spec.Resources {
-				obj := &unstructured.Unstructured{}
-				if err := obj.UnmarshalJSON(res.Raw); err != nil {
-					log.Error(err, "Failed to unmarshal resource")
-					continue
-				}
-				obj.SetNamespace(ns.Name)
-				if err := r.Create(ctx, obj); err != nil {
-					log.Error(err, "Failed to create resource", "gvk", obj.GroupVersionKind())
-				} else {
-					log.Info("Created resource", "kind", obj.GetKind(), "name", obj.GetName())
-				}
+	if err := r.Get(ctx, req.NamespacedName, &class); err != nil {
+		// If not found, look for orphaned namespaces and emit warning events
+		if client.IgnoreNotFound(err) == nil {
+			var nsList corev1.NamespaceList
+			if listErr := r.List(ctx, &nsList, client.MatchingLabels{
+				NamespaceClassNameKey: req.Name,
+			}); listErr != nil {
+				return ctrl.Result{}, listErr
 			}
+			for _, ns := range nsList.Items {
+				r.Recorder.Eventf(&ns, corev1.EventTypeWarning, "OrphanedNamespaceClass",
+					"Namespace references missing NamespaceClass '%s'", req.Name)
+			}
+		}
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	log.Info("Reconciling NamespaceClass", "name", class.Name)
+
+	// Handle deletion via finalizer
+	if !class.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&class, NamespaceClassFinalizerKey) {
+			log.Info("🧹 Finalizing NamespaceClass deletion")
+			if res, err := r.reconcileNamespaceClassDelete(ctx, class.Name); err != nil {
+				return res, err
+			}
+
+			// Remove finalizer after successful cleanup
+			controllerutil.RemoveFinalizer(&class, NamespaceClassFinalizerKey)
+			if err := r.Update(ctx, &class); err != nil {
+				return ctrl.Result{}, err
+			}
+			log.Info("✅ Finalizer removed, deletion can proceed")
 		}
 		return ctrl.Result{}, nil
 	}
 
-	// If neither exists, maybe the class was deleted
-	log.Info("Handling deleted NamespaceClass")
-	return r.reconcileNamespaceClassDelete(ctx, req.Name)
+	// Ensure finalizer is present for cleanup later
+	if !controllerutil.ContainsFinalizer(&class, NamespaceClassFinalizerKey) {
+		controllerutil.AddFinalizer(&class, NamespaceClassFinalizerKey)
+		if err := r.Update(ctx, &class); err != nil {
+			return ctrl.Result{}, err
+		}
+		log.Info("🔖 Finalizer added to NamespaceClass")
+	}
+
+	// Inject resources into all matching namespaces
+	var nsList corev1.NamespaceList
+	if err := r.List(ctx, &nsList, client.MatchingLabels{
+		NamespaceClassNameKey: class.Name,
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	for _, ns := range nsList.Items {
+		log := log.WithValues("namespace", ns.Name)
+		for _, res := range class.Spec.Resources {
+			obj := &unstructured.Unstructured{}
+			if err := obj.UnmarshalJSON(res.Raw); err != nil {
+				log.Error(err, "Failed to unmarshal resource")
+				continue
+			}
+			obj.SetNamespace(ns.Name)
+			if err := r.Create(ctx, obj); err != nil {
+				log.Error(err, "Failed to create resource", "gvk", obj.GroupVersionKind())
+			} else {
+				log.Info("Created resource", "kind", obj.GetKind(), "name", obj.GetName())
+			}
+		}
+	}
+
+	return ctrl.Result{}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -137,7 +182,14 @@ func (r *NamespaceClassReconciler) reconcileNamespaceClassDelete(ctx context.Con
 	if err := r.List(ctx, &nsList, client.MatchingLabels{
 		NamespaceClassNameKey: className,
 	}); err != nil {
+		log.Error(err, "Failed to list namespaces for cleanup")
 		return ctrl.Result{}, err
+	}
+
+	var class v1alpha1.NamespaceClass
+	if err := r.Get(ctx, types.NamespacedName{Name: className}, &class); err != nil {
+		log.Error(err, "Class not found — skipping resource cleanup")
+		return ctrl.Result{}, nil // Don't fail reconciliation; just skip
 	}
 
 	for _, ns := range nsList.Items {
@@ -145,24 +197,28 @@ func (r *NamespaceClassReconciler) reconcileNamespaceClassDelete(ctx context.Con
 
 		cleanup := ns.Annotations[NamespaceClassCleanupKey] == "true"
 		if cleanup {
-			log.Info("Cleaning up resources for namespace referencing deleted class")
+			for i, res := range class.Spec.Resources {
+				fmt.Printf("    🔧 [%d] Unmarshaling resource...\n", i)
+				obj := &unstructured.Unstructured{}
+				if err := obj.UnmarshalJSON(res.Raw); err != nil {
+					log.Error(err, "🚫 Failed to unmarshal embedded resource")
+					continue
+				}
 
-			// TODO: Update to support all types of resources from class.Spec.Resources
-			var cms corev1.ConfigMapList
-			if err := r.List(ctx, &cms, client.InNamespace(ns.Name)); err != nil {
-				log.Error(err, "Failed to list ConfigMaps for cleanup")
-				continue
-			}
+				gvk := obj.GroupVersionKind()
+				name := obj.GetName()
 
-			for _, cm := range cms.Items {
-				if err := r.Delete(ctx, &cm); err != nil {
-					log.Error(err, "Failed to delete ConfigMap", "name", cm.Name)
+				obj.SetNamespace(ns.Name)
+
+				if err := r.Delete(ctx, obj); err != nil {
+					log.Error(err, "Failed to delete resource", "kind", gvk.Kind, "name", name)
 				} else {
-					log.Info("Deleted ConfigMap", "name", cm.Name)
+					log.Info("Deleted resource", "kind", gvk.Kind, "name", name)
 				}
 			}
 		} else {
 			log.Info("Skipping cleanup; annotation not set")
+
 			r.Recorder.Eventf(&ns, corev1.EventTypeWarning, "OrphanedNamespaceClass",
 				"Namespace references deleted NamespaceClass '%s' but does not have cleanup enabled", className)
 		}
