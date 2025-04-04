@@ -35,9 +35,10 @@ import (
 )
 
 const (
-	NamespaceClassNameKey      = "namespaceclass.akuity.io/name"
-	NamespaceClassCleanupKey   = "namespaceclass.akuity.io/cleanup"
-	NamespaceClassFinalizerKey = "namespaceclass.kardolus.dev/finalizer"
+	NamespaceClassNameKey            = "namespaceclass.akuity.io/name"
+	NamespaceClassCleanupKey         = "namespaceclass.akuity.io/cleanup"
+	NamespaceClassCleanupObsoleteKey = "namespaceclass.akuity.io/cleanup-obsolete"
+	NamespaceClassFinalizerKey       = "namespaceclass.kardolus.dev/finalizer"
 )
 
 // NamespaceClassReconciler reconciles a NamespaceClass object
@@ -60,6 +61,14 @@ type NamespaceClassReconciler struct {
 //   - If the "namespaceclass.akuity.io/name" label is present on the Namespace,
 //     the controller looks up the referenced NamespaceClass and injects its
 //     defined resources into the Namespace.
+//   - Resources are created if missing, or updated in-place if they already exist.
+//
+// For NamespaceClass updates:
+//   - The controller reconciles all Namespaces that reference the class.
+//   - Resources are updated or created as needed.
+//   - If the Namespace has the annotation "namespaceclass.akuity.io/cleanup-obsolete: true",
+//     resources that were previously injected but are no longer defined in the NamespaceClass
+//     will be deleted.
 //
 // For NamespaceClass deletion events:
 //   - The controller identifies all Namespaces that reference the deleted class.
@@ -104,7 +113,6 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 				return res, err
 			}
 
-			// Remove finalizer after successful cleanup
 			controllerutil.RemoveFinalizer(&class, NamespaceClassFinalizerKey)
 			if err := r.Update(ctx, &class); err != nil {
 				return ctrl.Result{}, err
@@ -114,7 +122,6 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, nil
 	}
 
-	// Ensure finalizer is present for cleanup later
 	if !controllerutil.ContainsFinalizer(&class, NamespaceClassFinalizerKey) {
 		controllerutil.AddFinalizer(&class, NamespaceClassFinalizerKey)
 		if err := r.Update(ctx, &class); err != nil {
@@ -123,7 +130,6 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		log.Info("🔖 Finalizer added to NamespaceClass")
 	}
 
-	// Inject or update resources in all matching namespaces
 	var nsList corev1.NamespaceList
 	if err := r.List(ctx, &nsList, client.MatchingLabels{
 		NamespaceClassNameKey: class.Name,
@@ -133,9 +139,38 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	for _, ns := range nsList.Items {
 		nsLog := log.WithValues("namespace", ns.Name)
+		cleanup := ns.Annotations[NamespaceClassCleanupObsoleteKey] == "true"
+
+		// Track desired resource names
+		desired := map[string]struct{}{}
+
 		for _, res := range class.Spec.Resources {
-			if err := r.upsert(ctx, res, ns.Name); err != nil {
+			obj := &unstructured.Unstructured{}
+			if err := obj.UnmarshalJSON(res.Raw); err != nil {
+				nsLog.Error(err, "Failed to unmarshal resource")
+				continue
+			}
+			obj.SetNamespace(ns.Name)
+			desired[obj.GetName()] = struct{}{}
+
+			if err := r.upsert(ctx, obj); err != nil {
 				nsLog.Error(err, "Failed to upsert resource")
+			}
+		}
+
+		// Cleanup obsolete ConfigMaps if enabled
+		if cleanup {
+			var cmList corev1.ConfigMapList
+			if err := r.List(ctx, &cmList, client.InNamespace(ns.Name)); err == nil {
+				for _, cm := range cmList.Items {
+					if _, keep := desired[cm.Name]; !keep {
+						if err := r.Delete(ctx, &cm); err != nil {
+							nsLog.Error(err, "Failed to delete obsolete ConfigMap", "name", cm.Name)
+						} else {
+							nsLog.Info("Deleted obsolete ConfigMap", "name", cm.Name)
+						}
+					}
+				}
 			}
 		}
 	}
@@ -261,27 +296,17 @@ func (r *NamespaceClassReconciler) reconcileNamespaceCreate(ctx context.Context,
 	return ctrl.Result{}, nil
 }
 
-func (r *NamespaceClassReconciler) upsert(ctx context.Context, raw runtime.RawExtension, namespace string) error {
-	log := ctrl.LoggerFrom(ctx).WithValues("namespace", namespace)
+func (r *NamespaceClassReconciler) upsert(ctx context.Context, obj *unstructured.Unstructured) error {
+	log := ctrl.LoggerFrom(ctx).WithValues("namespace", obj.GetNamespace())
 
-	obj := &unstructured.Unstructured{}
-	if err := obj.UnmarshalJSON(raw.Raw); err != nil {
-		log.Error(err, "Failed to unmarshal embedded resource")
-		return err
-	}
-
-	obj.SetNamespace(namespace)
-
-	// Check if the resource already exists
 	key := types.NamespacedName{
 		Name:      obj.GetName(),
-		Namespace: namespace,
+		Namespace: obj.GetNamespace(),
 	}
 	existing := &unstructured.Unstructured{}
 	existing.SetGroupVersionKind(obj.GroupVersionKind())
 
 	if err := r.Get(ctx, key, existing); err == nil {
-		// Already exists: perform update
 		obj.SetResourceVersion(existing.GetResourceVersion())
 		if err := r.Update(ctx, obj); err != nil {
 			log.Error(err, "Failed to update existing resource", "gvk", obj.GroupVersionKind(), "name", obj.GetName())
@@ -291,7 +316,6 @@ func (r *NamespaceClassReconciler) upsert(ctx context.Context, raw runtime.RawEx
 		return nil
 	}
 
-	// Otherwise, create it
 	if err := r.Create(ctx, obj); err != nil {
 		log.Error(err, "Failed to create resource", "gvk", obj.GroupVersionKind(), "name", obj.GetName())
 		return err
@@ -301,6 +325,4 @@ func (r *NamespaceClassReconciler) upsert(ctx context.Context, raw runtime.RawEx
 	return nil
 }
 
-// TODO Upsert: handle resource deletions
-// TODO Upsert: handle renamed resources
 // TODO Bonus: use Akuity or Argo to run CI/CD

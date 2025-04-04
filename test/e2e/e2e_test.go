@@ -290,4 +290,50 @@ var _ = Describe("namespaceclass operator e2e", Ordered, func() {
 		_ = utils.DeleteResource("namespaceclass", class)
 		_ = utils.DeleteEventsForInvolvedObject(ns)
 	})
+
+	It("should delete obsolete resources when cleanup-obsolete annotation is present", func() {
+		const ns = "obsolete-ns"
+		const class = "obsolete-class"
+		const initialCM = "keep-this"
+		const obsoleteCM = "delete-this"
+
+		By("creating a namespace with cleanup-obsolete annotation and class label")
+		Expect(utils.ApplyNamespaceWithLabel(ns, class)).To(Succeed())
+		Expect(utils.PatchNamespace(ns, map[string]string{
+			"namespaceclass.akuity.io/cleanup-obsolete": "true",
+		})).To(Succeed())
+
+		By("applying the NamespaceClass with two ConfigMaps")
+		Expect(utils.ApplyNamespaceClassMulti(class, map[string]string{
+			initialCM:  "initial",
+			obsoleteCM: "temporary",
+		})).To(Succeed())
+
+		By("waiting for both ConfigMaps to appear")
+		Eventually(func() string {
+			out, _ := exec.Command("kubectl", "get", "configmap", obsoleteCM, "-n", ns, "-o", "yaml").CombinedOutput()
+			return string(out)
+		}, time.Minute, 5*time.Second).Should(ContainSubstring("foo: temporary"))
+
+		By("updating the NamespaceClass to remove one ConfigMap")
+		Expect(utils.ApplyNamespaceClassMulti(class, map[string]string{
+			initialCM: "initial", // keep this
+		})).To(Succeed())
+
+		By("verifying the obsolete ConfigMap is removed")
+		Eventually(func() string {
+			out, _ := exec.Command("kubectl", "get", "configmap", obsoleteCM, "-n", ns).CombinedOutput()
+			return string(out)
+		}, time.Minute, 5*time.Second).Should(ContainSubstring("NotFound"))
+
+		By("verifying the remaining ConfigMap still exists")
+		cmd := exec.Command("kubectl", "get", "configmap", initialCM, "-n", ns, "-o", "yaml")
+		out, err := cmd.CombinedOutput()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(out)).To(ContainSubstring("foo: initial"))
+
+		_ = utils.DeleteResource("namespace", ns)
+		_ = utils.DeleteResource("namespaceclass", class)
+		_ = utils.DeleteEventsForInvolvedObject(ns)
+	})
 })

@@ -59,6 +59,32 @@ metadata:
 	return KubectlApply([]byte(manifest))
 }
 
+func ApplyNamespaceClassMulti(className string, configMaps map[string]string) error {
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, `apiVersion: namespace.kardolus.dev/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: %s
+spec:
+  resources:
+`, className)
+	for name, value := range configMaps {
+		fmt.Fprintf(&buf, `  - apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: %s
+    data:
+      foo: %s
+`, name, value)
+	}
+
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = &buf
+	cmd.Stdout = GinkgoWriter
+	cmd.Stderr = GinkgoWriter
+	return cmd.Run()
+}
+
 // DeleteEventsForInvolvedObject deletes Warning events for a given involved object name in the default namespace.
 func DeleteEventsForInvolvedObject(name string) error {
 	cmd := exec.Command(

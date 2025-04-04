@@ -1,3 +1,19 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package controller_test
 
 import (
@@ -206,6 +222,42 @@ var _ = Describe("Reconcile", func() {
 			cms := listConfigMaps(r.Client, ctx, ns.Name)
 			Expect(cms).To(HaveLen(1))
 			Expect(cms[0].Data).To(HaveKeyWithValue("foo", "bar"))
+		})
+
+		It("should delete obsolete resources if cleanup-obsolete annotation is set", func() {
+			ns := newNamespace("rename-ns", "rename-class")
+			ns.Annotations = map[string]string{
+				controller.NamespaceClassCleanupObsoleteKey: "true",
+			}
+
+			oldCM := newInjectedConfigMap("old-name", ns.Name, map[string]string{"foo": "old"})
+			newCM := mustRawConfigMap("new-name", map[string]string{"foo": "new"})
+
+			class := newNamespaceClass("rename-class", newCM)
+			r, _, ctx := setupTestReconciler(ns, class, oldCM)
+
+			_, err := r.Reconcile(ctx, requestFor(class))
+			Expect(err).NotTo(HaveOccurred())
+
+			cms := listConfigMaps(r.Client, ctx, ns.Name)
+			Expect(cms).To(HaveLen(1))
+			Expect(cms[0].Name).To(Equal("new-name"))
+		})
+
+		It("should not delete obsolete resources if cleanup-obsolete annotation is missing", func() {
+			ns := newNamespace("preserve-ns", "preserve-class")
+			oldCM := newInjectedConfigMap("old-name", ns.Name, map[string]string{"foo": "old"})
+			newCM := mustRawConfigMap("new-name", map[string]string{"foo": "new"})
+
+			class := newNamespaceClass("preserve-class", newCM)
+			r, _, ctx := setupTestReconciler(ns, class, oldCM)
+
+			_, err := r.Reconcile(ctx, requestFor(class))
+			Expect(err).NotTo(HaveOccurred())
+
+			cms := listConfigMaps(r.Client, ctx, ns.Name)
+			Expect(cms).To(HaveLen(2))
+			Expect([]string{cms[0].Name, cms[1].Name}).To(ContainElements("old-name", "new-name"))
 		})
 	})
 
