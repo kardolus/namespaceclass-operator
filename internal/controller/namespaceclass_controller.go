@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"github.com/kardolus/namespaceclass-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -88,7 +87,7 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Otherwise assume it's a NamespaceClass
 	var class v1alpha1.NamespaceClass
 	if err := r.Get(ctx, req.NamespacedName, &class); err != nil {
-		if client.IgnoreNotFound(err) == nil {
+		if client.IgnoreNotFound(err) == nil { // NamespaceClass was deleted
 			var nsList corev1.NamespaceList
 			if listErr := r.List(ctx, &nsList, client.MatchingLabels{
 				NamespaceClassNameKey: req.Name,
@@ -116,7 +115,6 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			if err := r.Update(ctx, &class); err != nil {
 				return ctrl.Result{}, err
 			}
-			log.Info("✅ Finalizer removed, deletion can proceed")
 		}
 		return ctrl.Result{}, nil
 	}
@@ -126,7 +124,6 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		if err := r.Update(ctx, &class); err != nil {
 			return ctrl.Result{}, err
 		}
-		log.Info("🔖 Finalizer added to NamespaceClass")
 	}
 
 	var nsList corev1.NamespaceList
@@ -230,11 +227,9 @@ func (r *NamespaceClassReconciler) reconcileNamespaceClassDelete(ctx context.Con
 
 		cleanup := ns.Annotations[NamespaceClassCleanupKey] == "true"
 		if cleanup {
-			for i, res := range class.Spec.Resources {
-				fmt.Printf("    🔧 [%d] Unmarshaling resource...\n", i)
+			for _, res := range class.Spec.Resources {
 				obj := &unstructured.Unstructured{}
 				if err := obj.UnmarshalJSON(res.Raw); err != nil {
-					log.Error(err, "🚫 Failed to unmarshal embedded resource")
 					continue
 				}
 
