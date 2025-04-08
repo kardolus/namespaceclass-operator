@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -87,7 +88,6 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Otherwise assume it's a NamespaceClass
 	var class v1alpha1.NamespaceClass
 	if err := r.Get(ctx, req.NamespacedName, &class); err != nil {
-		// If not found, look for orphaned namespaces and emit warning events
 		if client.IgnoreNotFound(err) == nil {
 			var nsList corev1.NamespaceList
 			if listErr := r.List(ctx, &nsList, client.MatchingLabels{
@@ -105,7 +105,6 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	log.Info("Reconciling NamespaceClass", "name", class.Name)
 
-	// Handle deletion via finalizer
 	if !class.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&class, NamespaceClassFinalizerKey) {
 			log.Info("🧹 Finalizing NamespaceClass deletion")
@@ -141,8 +140,9 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		nsLog := log.WithValues("namespace", ns.Name)
 		cleanup := ns.Annotations[NamespaceClassCleanupObsoleteKey] == "true"
 
-		// Track desired resource names
+		// Track desired objects and GVKs
 		desired := map[string]struct{}{}
+		desiredKinds := map[schema.GroupVersionKind]struct{}{}
 
 		for _, res := range class.Spec.Resources {
 			obj := &unstructured.Unstructured{}
@@ -152,22 +152,28 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			}
 			obj.SetNamespace(ns.Name)
 			desired[obj.GetName()] = struct{}{}
+			desiredKinds[obj.GroupVersionKind()] = struct{}{}
 
 			if err := r.upsert(ctx, obj); err != nil {
 				nsLog.Error(err, "Failed to upsert resource")
 			}
 		}
 
-		// Cleanup obsolete ConfigMaps if enabled
 		if cleanup {
-			var cmList corev1.ConfigMapList
-			if err := r.List(ctx, &cmList, client.InNamespace(ns.Name)); err == nil {
-				for _, cm := range cmList.Items {
-					if _, keep := desired[cm.Name]; !keep {
-						if err := r.Delete(ctx, &cm); err != nil {
-							nsLog.Error(err, "Failed to delete obsolete ConfigMap", "name", cm.Name)
+			for gvk := range desiredKinds {
+				list := &unstructured.UnstructuredList{}
+				list.SetGroupVersionKind(gvk)
+				if err := r.List(ctx, list, client.InNamespace(ns.Name)); err != nil {
+					nsLog.Error(err, "Failed to list resources for cleanup", "gvk", gvk)
+					continue
+				}
+
+				for _, obj := range list.Items {
+					if _, keep := desired[obj.GetName()]; !keep {
+						if err := r.Delete(ctx, &obj); err != nil {
+							nsLog.Error(err, "Failed to delete obsolete resource", "kind", gvk.Kind, "name", obj.GetName())
 						} else {
-							nsLog.Info("Deleted obsolete ConfigMap", "name", cm.Name)
+							nsLog.Info("Deleted obsolete resource", "kind", gvk.Kind, "name", obj.GetName())
 						}
 					}
 				}
@@ -184,7 +190,7 @@ func (r *NamespaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.NamespaceClass{}). // Primary resource
-		Watches( // Watch namespaces to trigger reconcile on the referenced NamespaceClass
+		Watches(                         // Watch namespaces to trigger reconcile on the referenced NamespaceClass
 			&corev1.Namespace{},
 			handler.EnqueueRequestsFromMapFunc(r.mapNamespaceToNamespaceClass),
 			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
