@@ -1,0 +1,23 @@
+# Creates a NamespaceClass and a labeled Namespace.
+# Expected: ConfigMap `injected-config` appears in `web-portal` with data foo: bar
+
+---
+apiVersion: namespace.kardolus.dev/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: public-network
+spec:
+  resources:
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: injected-config
+      data:
+        foo: bar
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: web-portal
+  labels:
+    namespaceclass.akuity.io/name: public-network

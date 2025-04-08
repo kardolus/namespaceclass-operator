@@ -1,0 +1,25 @@
+# Namespace with cleanup annotation.
+# Expected: ConfigMap is cleaned up when the NamespaceClass is deleted.
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cleanup-ns
+  labels:
+    namespaceclass.akuity.io/name: cleanup-class
+  annotations:
+    namespaceclass.akuity.io/cleanup: "true"
+---
+apiVersion: namespace.kardolus.dev/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: cleanup-class
+spec:
+  resources:
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: cleanup-config
+      data:
+        foo: to-be-cleaned

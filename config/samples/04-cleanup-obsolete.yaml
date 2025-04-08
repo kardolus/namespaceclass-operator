@@ -1,0 +1,46 @@
+# Demonstrates cleanup of obsolete resources when annotation is set.
+# Expected: `delete-this` ConfigMap is removed after update.
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: obsolete-ns
+  labels:
+    namespaceclass.akuity.io/name: obsolete-class
+  annotations:
+    namespaceclass.akuity.io/cleanup-obsolete: "true"
+---
+# Initial NamespaceClass with 2 ConfigMaps
+apiVersion: namespace.kardolus.dev/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: obsolete-class
+spec:
+  resources:
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: keep-this
+      data:
+        foo: initial
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: delete-this
+      data:
+        foo: temporary
+---
+# Updated NamespaceClass with only one ConfigMap
+apiVersion: namespace.kardolus.dev/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: obsolete-class
+spec:
+  resources:
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: keep-this
+      data:
+        foo: initial

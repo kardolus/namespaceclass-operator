@@ -1,0 +1,23 @@
+# Create a Namespace before the NamespaceClass.
+# Expected: ConfigMap `late-injected` appears in `late-bound-ns` after NamespaceClass is applied.
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: late-bound-ns
+  labels:
+    namespaceclass.akuity.io/name: delayed-class
+---
+apiVersion: namespace.kardolus.dev/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: delayed-class
+spec:
+  resources:
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: late-injected
+      data:
+        foo: late-bar
