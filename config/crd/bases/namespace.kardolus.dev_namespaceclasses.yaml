@@ -50,6 +50,12 @@ spec:
             type: object
           status:
             description: NamespaceClassStatus defines the observed state of NamespaceClass
+            properties:
+              lastAppliedResources:
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                type: array
             type: object
         type: object
     served: true

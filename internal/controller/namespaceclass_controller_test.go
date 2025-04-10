@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -230,15 +231,34 @@ var _ = Describe("Reconcile", func() {
 				controller.NamespaceClassCleanupObsoleteKey: "true",
 			}
 
-			oldCM := newInjectedConfigMap("old-name", ns.Name, map[string]string{"foo": "old"})
-			newCM := mustRawConfigMap("new-name", map[string]string{"foo": "new"})
+			oldCM := mustRawConfigMap("old-name", map[string]string{"foo": "old"})
+			injected := newInjectedConfigMap("old-name", ns.Name, map[string]string{"foo": "old"})
 
-			class := newNamespaceClass("rename-class", newCM)
-			r, _, ctx := setupTestReconciler(ns, class, oldCM)
+			class := newNamespaceClass("rename-class", oldCM)
+			r, _, ctx := setupTestReconciler(ns, class, injected)
 
+			// First reconcile to apply the old resource
 			_, err := r.Reconcile(ctx, requestFor(class))
 			Expect(err).NotTo(HaveOccurred())
 
+			// Simulate controller having tracked oldCM in status
+			var persisted v1alpha1.NamespaceClass
+			Expect(r.Get(ctx, types.NamespacedName{Name: class.Name}, &persisted)).To(Succeed())
+			persisted.Status.LastAppliedResources = []runtime.RawExtension{oldCM}
+			Expect(r.Status().Update(ctx, &persisted)).To(Succeed())
+
+			// Now update spec to use new-name instead
+			newCM := mustRawConfigMap("new-name", map[string]string{"foo": "new"})
+			persisted.Spec.Resources = []runtime.RawExtension{newCM}
+			Expect(r.Update(ctx, &persisted)).To(Succeed())
+
+			// Trigger another reconcile
+			var trigger v1alpha1.NamespaceClass
+			Expect(r.Get(ctx, types.NamespacedName{Name: persisted.Name}, &trigger)).To(Succeed())
+			_, err = r.Reconcile(ctx, requestFor(&trigger))
+			Expect(err).NotTo(HaveOccurred())
+
+			// Now only new-name should exist
 			cms := listConfigMaps(r.Client, ctx, ns.Name)
 			Expect(cms).To(HaveLen(1))
 			Expect(cms[0].Name).To(Equal("new-name"))
@@ -302,6 +322,19 @@ func mustRawConfigMap(name string, data map[string]string) runtime.RawExtension 
 	raw, err := json.Marshal(cm)
 	Expect(err).NotTo(HaveOccurred())
 	return runtime.RawExtension{Raw: raw}
+}
+
+func mustUnstructuredInNamespace(raw runtime.RawExtension, ns string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	Expect(u.UnmarshalJSON(raw.Raw)).To(Succeed())
+	u.SetNamespace(ns)
+
+	// Extract GVK from the RawExtension
+	obj := &unstructured.Unstructured{}
+	Expect(obj.UnmarshalJSON(raw.Raw)).To(Succeed())
+	u.SetGroupVersionKind(obj.GroupVersionKind())
+
+	return u
 }
 
 func newNamespace(name, classLabel string) *corev1.Namespace {
@@ -373,7 +406,11 @@ func setupTestReconciler(objs ...client.Object) (*controller.NamespaceClassRecon
 	Expect(corev1.AddToScheme(scheme)).To(Succeed())
 	Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(objs...).
+		WithStatusSubresource(&v1alpha1.NamespaceClass{}).
+		Build()
 
 	r := &controller.NamespaceClassReconciler{
 		Client:   client,

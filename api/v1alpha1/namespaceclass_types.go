@@ -30,12 +30,13 @@ type NamespaceClassSpec struct {
 
 // NamespaceClassStatus defines the observed state of NamespaceClass
 type NamespaceClassStatus struct {
-	// TODO INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
+	LastAppliedResources []runtime.RawExtension `json:"lastAppliedResources,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:subresource:status
 
 // NamespaceClass is the Schema for the namespaceclasses API
 type NamespaceClass struct {

@@ -87,7 +87,7 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Otherwise assume it's a NamespaceClass
 	var class v1alpha1.NamespaceClass
 	if err := r.Get(ctx, req.NamespacedName, &class); err != nil {
-		if client.IgnoreNotFound(err) == nil { // NamespaceClass was deleted
+		if client.IgnoreNotFound(err) == nil {
 			var nsList corev1.NamespaceList
 			if listErr := r.List(ctx, &nsList, client.MatchingLabels{
 				NamespaceClassNameKey: req.Name,
@@ -106,11 +106,10 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	if !class.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&class, NamespaceClassFinalizerKey) {
-			log.Info("🧹 Finalizing NamespaceClass deletion")
+			log.Info("Finalizing NamespaceClass deletion")
 			if res, err := r.reconcileNamespaceClassDelete(ctx, class.Name); err != nil {
 				return res, err
 			}
-
 			controllerutil.RemoveFinalizer(&class, NamespaceClassFinalizerKey)
 			if err := r.Update(ctx, &class); err != nil {
 				return ctrl.Result{}, err
@@ -126,6 +125,11 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 
+	currentMap := toNameGVKMap(class.Spec.Resources)
+	lastAppliedMap := toNameGVKMap(class.Status.LastAppliedResources)
+	removed := diffRemoved(lastAppliedMap, currentMap)
+
+	// Reconcile all namespaces using this class
 	var nsList corev1.NamespaceList
 	if err := r.List(ctx, &nsList, client.MatchingLabels{
 		NamespaceClassNameKey: class.Name,
@@ -137,10 +141,7 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		nsLog := log.WithValues("namespace", ns.Name)
 		cleanup := ns.Annotations[NamespaceClassCleanupObsoleteKey] == "true"
 
-		// Track desired objects and GVKs
-		desired := map[string]struct{}{}
-		desiredKinds := map[schema.GroupVersionKind]struct{}{}
-
+		// Create/update resources
 		for _, res := range class.Spec.Resources {
 			obj := &unstructured.Unstructured{}
 			if err := obj.UnmarshalJSON(res.Raw); err != nil {
@@ -148,34 +149,32 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 				continue
 			}
 			obj.SetNamespace(ns.Name)
-			desired[obj.GetName()] = struct{}{}
-			desiredKinds[obj.GroupVersionKind()] = struct{}{}
-
 			if err := r.upsert(ctx, obj); err != nil {
 				nsLog.Error(err, "Failed to upsert resource")
 			}
 		}
 
+		// Delete removed ones
 		if cleanup {
-			for gvk := range desiredKinds {
-				list := &unstructured.UnstructuredList{}
-				list.SetGroupVersionKind(gvk)
-				if err := r.List(ctx, list, client.InNamespace(ns.Name)); err != nil {
-					nsLog.Error(err, "Failed to list resources for cleanup", "gvk", gvk)
-					continue
-				}
-
-				for _, obj := range list.Items {
-					if _, keep := desired[obj.GetName()]; !keep {
-						if err := r.Delete(ctx, &obj); err != nil {
-							nsLog.Error(err, "Failed to delete obsolete resource", "kind", gvk.Kind, "name", obj.GetName())
-						} else {
-							nsLog.Info("Deleted obsolete resource", "kind", gvk.Kind, "name", obj.GetName())
-						}
-					}
+			for name, gvk := range removed {
+				obj := &unstructured.Unstructured{}
+				obj.SetGroupVersionKind(gvk)
+				obj.SetName(name)
+				obj.SetNamespace(ns.Name)
+				if err := r.Delete(ctx, obj); err != nil {
+					nsLog.Error(err, "Failed to delete obsolete resource", "kind", gvk.Kind, "name", name)
+				} else {
+					nsLog.Info("Deleted obsolete resource", "kind", gvk.Kind, "name", name)
 				}
 			}
 		}
+	}
+
+	// Update LastAppliedResources
+	class.Status.LastAppliedResources = class.Spec.Resources
+	if err := r.Status().Update(ctx, &class); err != nil {
+		log.Error(err, "Failed to update NamespaceClass status")
+		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
@@ -326,4 +325,24 @@ func (r *NamespaceClassReconciler) upsert(ctx context.Context, obj *unstructured
 	return nil
 }
 
-// TODO Bonus: use Akuity or Argo to run CI/CD
+func toNameGVKMap(resources []runtime.RawExtension) map[string]schema.GroupVersionKind {
+	result := make(map[string]schema.GroupVersionKind)
+	for _, raw := range resources {
+		obj := &unstructured.Unstructured{}
+		if err := obj.UnmarshalJSON(raw.Raw); err != nil {
+			continue
+		}
+		result[obj.GetName()] = obj.GroupVersionKind()
+	}
+	return result
+}
+
+func diffRemoved(old, current map[string]schema.GroupVersionKind) map[string]schema.GroupVersionKind {
+	removed := make(map[string]schema.GroupVersionKind)
+	for name, gvk := range old {
+		if _, exists := current[name]; !exists {
+			removed[name] = gvk
+		}
+	}
+	return removed
+}
