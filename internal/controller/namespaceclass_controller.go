@@ -77,8 +77,6 @@ type NamespaceClassReconciler struct {
 //     "namespaceclass.akuity.io/cleanup: true", injected resources are cleaned up.
 //   - Otherwise, a warning Event is emitted to indicate that the Namespace is now orphaned.
 func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := ctrl.LoggerFrom(ctx).WithValues("reconcile", req.NamespacedName)
-
 	// Try to fetch as a Namespace
 	ns := &corev1.Namespace{}
 	if err := r.Get(ctx, req.NamespacedName, ns); err == nil {
@@ -91,6 +89,7 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return r.handleMissingNamespaceClass(ctx, req.Name, err)
 	}
 
+	log := ctrl.LoggerFrom(ctx).WithValues("reconcile", req.NamespacedName)
 	log.Info("Reconciling NamespaceClass", "name", class.Name)
 
 	if class.DeletionTimestamp != nil {
@@ -110,7 +109,7 @@ func (r *NamespaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.NamespaceClass{}). // Primary resource
-		Watches( // Watch namespaces to trigger reconcile on the referenced NamespaceClass
+		Watches(                         // Watch namespaces to trigger reconcile on the referenced NamespaceClass
 			&corev1.Namespace{},
 			handler.EnqueueRequestsFromMapFunc(r.mapNamespaceToNamespaceClass),
 			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
