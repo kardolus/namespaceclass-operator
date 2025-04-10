@@ -1,0 +1,14 @@
+# Updated NamespaceClass with only one ConfigMap
+apiVersion: namespace.kardolus.dev/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: obsolete-class
+spec:
+  resources:
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: keep-this
+      data:
+        foo: initial
+

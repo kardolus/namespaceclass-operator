@@ -336,4 +336,51 @@ var _ = Describe("namespaceclass operator e2e", Ordered, func() {
 		_ = utils.DeleteResource("namespaceclass", class)
 		_ = utils.DeleteEventsForInvolvedObject(ns)
 	})
+
+	It("should not delete user-created resources during cleanup-obsolete", func() {
+		const ns = "user-owned-ns"
+		const class = "user-owned-class"
+		const cmInjected = "injected-by-class"
+		const cmUser = "user-created"
+
+		By("creating a namespace with cleanup-obsolete annotation and class label")
+		Expect(utils.ApplyNamespaceWithLabel(ns, class)).To(Succeed())
+		Expect(utils.PatchNamespace(ns, map[string]string{
+			controller.NamespaceClassCleanupObsoleteKey: "true",
+		})).To(Succeed())
+
+		By("applying the NamespaceClass with one ConfigMap")
+		Expect(utils.ApplyNamespaceClass(class, cmInjected, "from-class")).To(Succeed())
+
+		By("waiting for the injected ConfigMap to appear")
+		Eventually(func() string {
+			out, _ := exec.Command("kubectl", "get", "configmap", cmInjected, "-n", ns, "-o", "yaml").CombinedOutput()
+			return string(out)
+		}, time.Minute, 5*time.Second).Should(ContainSubstring("foo: from-class"))
+
+		By("creating an unrelated user-owned ConfigMap")
+		Expect(utils.ApplyRawYAML(fmt.Sprintf(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %s
+  namespace: %s
+data:
+  foo: user-owned
+`, cmUser, ns))).To(Succeed())
+
+		By("updating the NamespaceClass to trigger cleanup")
+		Expect(utils.ApplyNamespaceClass(class, cmInjected, "updated-from-class")).To(Succeed())
+
+		By("verifying the user-owned ConfigMap is still present (i.e., NOT deleted)")
+		Consistently(func() string {
+			out, _ := exec.Command("kubectl", "get", "configmap", cmUser, "-n", ns, "-o", "yaml").CombinedOutput()
+			return string(out)
+		}, 10*time.Second, 2*time.Second).Should(ContainSubstring("foo: user-owned"))
+
+		By("cleaning up")
+		_ = utils.DeleteResource("namespace", ns)
+		_ = utils.DeleteResource("namespaceclass", class)
+		_ = utils.DeleteEventsForInvolvedObject(ns)
+	})
 })

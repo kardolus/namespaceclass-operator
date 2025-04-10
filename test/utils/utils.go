@@ -85,6 +85,11 @@ spec:
 	return cmd.Run()
 }
 
+// ApplyRawYAML applies any raw YAML content via kubectl.
+func ApplyRawYAML(yaml string) error {
+	return KubectlApply([]byte(yaml))
+}
+
 // DeleteEventsForInvolvedObject deletes Warning events for a given involved object name in the default namespace.
 func DeleteEventsForInvolvedObject(name string) error {
 	cmd := exec.Command(
