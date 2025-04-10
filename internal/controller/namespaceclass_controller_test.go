@@ -25,7 +25,6 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -322,19 +321,6 @@ func mustRawConfigMap(name string, data map[string]string) runtime.RawExtension 
 	raw, err := json.Marshal(cm)
 	Expect(err).NotTo(HaveOccurred())
 	return runtime.RawExtension{Raw: raw}
-}
-
-func mustUnstructuredInNamespace(raw runtime.RawExtension, ns string) *unstructured.Unstructured {
-	u := &unstructured.Unstructured{}
-	Expect(u.UnmarshalJSON(raw.Raw)).To(Succeed())
-	u.SetNamespace(ns)
-
-	// Extract GVK from the RawExtension
-	obj := &unstructured.Unstructured{}
-	Expect(obj.UnmarshalJSON(raw.Raw)).To(Succeed())
-	u.SetGroupVersionKind(obj.GroupVersionKind())
-
-	return u
 }
 
 func newNamespace(name, classLabel string) *corev1.Namespace {
