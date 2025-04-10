@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"github.com/go-logr/logr"
 	"github.com/kardolus/namespaceclass-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -78,106 +79,29 @@ type NamespaceClassReconciler struct {
 func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx).WithValues("reconcile", req.NamespacedName)
 
-	// If this is a Namespace, handle it
-	var ns corev1.Namespace
-	if err := r.Get(ctx, req.NamespacedName, &ns); err == nil {
-		return r.reconcileNamespaceCreate(ctx, &ns)
+	// Try to fetch as a Namespace
+	ns := &corev1.Namespace{}
+	if err := r.Get(ctx, req.NamespacedName, ns); err == nil {
+		return r.reconcileNamespaceCreate(ctx, ns)
 	}
 
-	// Otherwise assume it's a NamespaceClass
-	var class v1alpha1.NamespaceClass
-	if err := r.Get(ctx, req.NamespacedName, &class); err != nil {
-		if client.IgnoreNotFound(err) == nil {
-			var nsList corev1.NamespaceList
-			if listErr := r.List(ctx, &nsList, client.MatchingLabels{
-				NamespaceClassNameKey: req.Name,
-			}); listErr != nil {
-				return ctrl.Result{}, listErr
-			}
-			for _, ns := range nsList.Items {
-				r.Recorder.Eventf(&ns, corev1.EventTypeWarning, "OrphanedNamespaceClass",
-					"Namespace references missing NamespaceClass '%s'", req.Name)
-			}
-		}
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+	// Try to fetch as a NamespaceClass
+	class := &v1alpha1.NamespaceClass{}
+	if err := r.Get(ctx, req.NamespacedName, class); err != nil {
+		return r.handleMissingNamespaceClass(ctx, req.Name, err)
 	}
 
 	log.Info("Reconciling NamespaceClass", "name", class.Name)
 
-	if !class.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(&class, NamespaceClassFinalizerKey) {
-			log.Info("Finalizing NamespaceClass deletion")
-			if res, err := r.reconcileNamespaceClassDelete(ctx, class.Name); err != nil {
-				return res, err
-			}
-			controllerutil.RemoveFinalizer(&class, NamespaceClassFinalizerKey)
-			if err := r.Update(ctx, &class); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		return ctrl.Result{}, nil
+	if class.DeletionTimestamp != nil {
+		return r.finalizeClass(ctx, log, class)
 	}
 
-	if !controllerutil.ContainsFinalizer(&class, NamespaceClassFinalizerKey) {
-		controllerutil.AddFinalizer(&class, NamespaceClassFinalizerKey)
-		if err := r.Update(ctx, &class); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	currentMap := toNameGVKMap(class.Spec.Resources)
-	lastAppliedMap := toNameGVKMap(class.Status.LastAppliedResources)
-	removed := diffRemoved(lastAppliedMap, currentMap)
-
-	// Reconcile all namespaces using this class
-	var nsList corev1.NamespaceList
-	if err := r.List(ctx, &nsList, client.MatchingLabels{
-		NamespaceClassNameKey: class.Name,
-	}); err != nil {
+	if err := r.ensureFinalizer(ctx, class); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	for _, ns := range nsList.Items {
-		nsLog := log.WithValues("namespace", ns.Name)
-		cleanup := ns.Annotations[NamespaceClassCleanupObsoleteKey] == "true"
-
-		// Create/update resources
-		for _, res := range class.Spec.Resources {
-			obj := &unstructured.Unstructured{}
-			if err := obj.UnmarshalJSON(res.Raw); err != nil {
-				nsLog.Error(err, "Failed to unmarshal resource")
-				continue
-			}
-			obj.SetNamespace(ns.Name)
-			if err := r.upsert(ctx, obj); err != nil {
-				nsLog.Error(err, "Failed to upsert resource")
-			}
-		}
-
-		// Delete removed ones
-		if cleanup {
-			for name, gvk := range removed {
-				obj := &unstructured.Unstructured{}
-				obj.SetGroupVersionKind(gvk)
-				obj.SetName(name)
-				obj.SetNamespace(ns.Name)
-				if err := r.Delete(ctx, obj); err != nil {
-					nsLog.Error(err, "Failed to delete obsolete resource", "kind", gvk.Kind, "name", name)
-				} else {
-					nsLog.Info("Deleted obsolete resource", "kind", gvk.Kind, "name", name)
-				}
-			}
-		}
-	}
-
-	// Update LastAppliedResources
-	class.Status.LastAppliedResources = class.Spec.Resources
-	if err := r.Status().Update(ctx, &class); err != nil {
-		log.Error(err, "Failed to update NamespaceClass status")
-		return ctrl.Result{}, err
-	}
-
-	return ctrl.Result{}, nil
+	return r.reconcileClassUpdates(ctx, log, class)
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -186,12 +110,50 @@ func (r *NamespaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.NamespaceClass{}). // Primary resource
-		Watches(                         // Watch namespaces to trigger reconcile on the referenced NamespaceClass
+		Watches( // Watch namespaces to trigger reconcile on the referenced NamespaceClass
 			&corev1.Namespace{},
 			handler.EnqueueRequestsFromMapFunc(r.mapNamespaceToNamespaceClass),
 			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
 		).
 		Complete(r)
+}
+
+func (r *NamespaceClassReconciler) ensureFinalizer(ctx context.Context, class *v1alpha1.NamespaceClass) error {
+	if !controllerutil.ContainsFinalizer(class, NamespaceClassFinalizerKey) {
+		controllerutil.AddFinalizer(class, NamespaceClassFinalizerKey)
+		return r.Update(ctx, class)
+	}
+	return nil
+}
+
+func (r *NamespaceClassReconciler) finalizeClass(ctx context.Context, log logr.Logger, class *v1alpha1.NamespaceClass) (ctrl.Result, error) {
+	if controllerutil.ContainsFinalizer(class, NamespaceClassFinalizerKey) {
+		log.Info("Finalizing NamespaceClass deletion")
+		if res, err := r.reconcileNamespaceClassDelete(ctx, class.Name); err != nil {
+			return res, err
+		}
+		controllerutil.RemoveFinalizer(class, NamespaceClassFinalizerKey)
+		if err := r.Update(ctx, class); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *NamespaceClassReconciler) handleMissingNamespaceClass(ctx context.Context, className string, err error) (ctrl.Result, error) {
+	if client.IgnoreNotFound(err) != nil {
+		return ctrl.Result{}, err
+	}
+
+	var nsList corev1.NamespaceList
+	if listErr := r.List(ctx, &nsList, client.MatchingLabels{NamespaceClassNameKey: className}); listErr != nil {
+		return ctrl.Result{}, listErr
+	}
+	for _, ns := range nsList.Items {
+		r.Recorder.Eventf(&ns, corev1.EventTypeWarning, "OrphanedNamespaceClass",
+			"Namespace references missing NamespaceClass '%s'", className)
+	}
+	return ctrl.Result{}, nil
 }
 
 func (r *NamespaceClassReconciler) mapNamespaceToNamespaceClass(ctx context.Context, obj client.Object) []reconcile.Request {
@@ -202,6 +164,29 @@ func (r *NamespaceClassReconciler) mapNamespaceToNamespaceClass(ctx context.Cont
 	return []reconcile.Request{{
 		NamespacedName: types.NamespacedName{Name: className},
 	}}
+}
+
+func (r *NamespaceClassReconciler) reconcileClassUpdates(ctx context.Context, log logr.Logger, class *v1alpha1.NamespaceClass) (ctrl.Result, error) {
+	currentMap := toNameGVKMap(class.Spec.Resources)
+	lastAppliedMap := toNameGVKMap(class.Status.LastAppliedResources)
+	removed := diffRemoved(lastAppliedMap, currentMap)
+
+	var nsList corev1.NamespaceList
+	if err := r.List(ctx, &nsList, client.MatchingLabels{NamespaceClassNameKey: class.Name}); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	for _, ns := range nsList.Items {
+		r.reconcileNamespaceForClass(ctx, log.WithValues("namespace", ns.Name), &ns, class, removed)
+	}
+
+	class.Status.LastAppliedResources = class.Spec.Resources
+	if err := r.Status().Update(ctx, class); err != nil {
+		log.Error(err, "Failed to update NamespaceClass status")
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, nil
 }
 
 func (r *NamespaceClassReconciler) reconcileNamespaceClassDelete(ctx context.Context, className string) (ctrl.Result, error) {
@@ -296,6 +281,42 @@ func (r *NamespaceClassReconciler) reconcileNamespaceCreate(ctx context.Context,
 	return ctrl.Result{}, nil
 }
 
+func (r *NamespaceClassReconciler) reconcileNamespaceForClass(
+	ctx context.Context,
+	log logr.Logger,
+	ns *corev1.Namespace,
+	class *v1alpha1.NamespaceClass,
+	removed map[string]schema.GroupVersionKind,
+) {
+	cleanup := ns.Annotations[NamespaceClassCleanupObsoleteKey] == "true"
+
+	for _, res := range class.Spec.Resources {
+		obj := &unstructured.Unstructured{}
+		if err := obj.UnmarshalJSON(res.Raw); err != nil {
+			log.Error(err, "Failed to unmarshal resource")
+			continue
+		}
+		obj.SetNamespace(ns.Name)
+		if err := r.upsert(ctx, obj); err != nil {
+			log.Error(err, "Failed to upsert resource")
+		}
+	}
+
+	if cleanup {
+		for name, gvk := range removed {
+			obj := &unstructured.Unstructured{}
+			obj.SetGroupVersionKind(gvk)
+			obj.SetName(name)
+			obj.SetNamespace(ns.Name)
+			if err := r.Delete(ctx, obj); err != nil {
+				log.Error(err, "Failed to delete obsolete resource", "kind", gvk.Kind, "name", name)
+			} else {
+				log.Info("Deleted obsolete resource", "kind", gvk.Kind, "name", name)
+			}
+		}
+	}
+}
+
 func (r *NamespaceClassReconciler) upsert(ctx context.Context, obj *unstructured.Unstructured) error {
 	log := ctrl.LoggerFrom(ctx).WithValues("namespace", obj.GetNamespace())
 
@@ -325,6 +346,16 @@ func (r *NamespaceClassReconciler) upsert(ctx context.Context, obj *unstructured
 	return nil
 }
 
+func diffRemoved(old, current map[string]schema.GroupVersionKind) map[string]schema.GroupVersionKind {
+	removed := make(map[string]schema.GroupVersionKind)
+	for name, gvk := range old {
+		if _, exists := current[name]; !exists {
+			removed[name] = gvk
+		}
+	}
+	return removed
+}
+
 func toNameGVKMap(resources []runtime.RawExtension) map[string]schema.GroupVersionKind {
 	result := make(map[string]schema.GroupVersionKind)
 	for _, raw := range resources {
@@ -335,14 +366,4 @@ func toNameGVKMap(resources []runtime.RawExtension) map[string]schema.GroupVersi
 		result[obj.GetName()] = obj.GroupVersionKind()
 	}
 	return result
-}
-
-func diffRemoved(old, current map[string]schema.GroupVersionKind) map[string]schema.GroupVersionKind {
-	removed := make(map[string]schema.GroupVersionKind)
-	for name, gvk := range old {
-		if _, exists := current[name]; !exists {
-			removed[name] = gvk
-		}
-	}
-	return removed
 }
