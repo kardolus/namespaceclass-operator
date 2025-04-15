@@ -1,9 +1,5 @@
 # namespaceclass-operator
 
-> ⚠️ **Disclaimer**: This project was written as part of a technical homework assignment.
-> Please note that I do **not** endorse interviewing at Akuity based on my experience —
-> I found the process lacking in professionalism and would encourage caution.
-
 A Kubernetes operator that enables reusable, class-based namespace provisioning.
 
 ## Description
@@ -25,7 +21,7 @@ The operator ensures:
 
 ### Prerequisites
 
-- go version v1.22.0+``
+- go version v1.22.0+
 - docker version 17.03+.
 - kubectl version v1.11.3+.
 - Access to a Kubernetes v1.11.3+ cluster.
